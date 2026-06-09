@@ -180,7 +180,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
 ### 🔨 Build from Source
 
 ```bash
-git clone https://github.com/pocketsentry/pocketsentry.git
+git clone https://github.com/apvcode/pocketsentry.git
 cd pocketsentry
 go mod tidy
 go build -o pocketsentry .
@@ -339,7 +339,7 @@ func main() {
 ### 🔨 Сборка из исходников
 
 ```bash
-git clone https://github.com/pocketsentry/pocketsentry.git
+git clone https://github.com/apvcode/pocketsentry.git
 cd pocketsentry
 go mod tidy
 go build -o pocketsentry .
