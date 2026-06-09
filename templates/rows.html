@@ -1,0 +1,57 @@
+{{range .}}
+<tr class="border-b border-gray-800/30 transition-colors duration-150">
+    <!-- Time -->
+    <td class="px-6 py-3.5 whitespace-nowrap">
+        <span class="text-xs text-gray-400 font-mono">{{.Timestamp}}</span>
+    </td>
+
+    <!-- Project -->
+    <td class="px-6 py-3.5 whitespace-nowrap">
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-medium bg-gray-800 text-gray-300 ring-1 ring-gray-700/50">
+            {{.ProjectID}}
+        </span>
+    </td>
+
+    <!-- Platform -->
+    <td class="px-6 py-3.5 whitespace-nowrap">
+        <span class="text-xs text-gray-400">{{.Platform}}</span>
+    </td>
+
+    <!-- Level badge -->
+    <td class="px-6 py-3.5 whitespace-nowrap">
+        {{if or (eq .Level "fatal") (eq .Level "error")}}
+        <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-red-500/15 text-red-400 ring-1 ring-red-500/20">
+            <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>
+            {{.Level}}
+        </span>
+        {{else if eq .Level "warning"}}
+        <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/20">
+            <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>
+            {{.Level}}
+        </span>
+        {{else}}
+        <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/20">
+            <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>
+            {{.Level}}
+        </span>
+        {{end}}
+    </td>
+
+    <!-- Message (truncated) -->
+    <td class="px-6 py-3.5 max-w-md">
+        <p class="text-sm text-gray-300 truncate" title="{{.Message}}">{{.Message}}</p>
+    </td>
+</tr>
+{{else}}
+<tr>
+    <td colspan="5" class="px-6 py-16 text-center">
+        <div class="flex flex-col items-center gap-3">
+            <svg class="w-10 h-10 text-gray-700" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+            </svg>
+            <p class="text-sm text-gray-600 font-medium">No events captured yet</p>
+            <p class="text-xs text-gray-700">Point your Sentry SDK at this server to start tracking errors.</p>
+        </div>
+    </td>
+</tr>
+{{end}}

@@ -1,0 +1,20 @@
+# Compiled binary
+pocketsentry
+*.exe
+*.out
+
+# SQLite database and WAL files
+*.db
+*.db-shm
+*.db-wal
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

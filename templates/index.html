@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="PocketSentry — ultra-lightweight self-hosted error tracker, a drop-in Sentry replacement.">
+    <title>PocketSentry — Drop-in Error Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+                    },
+                    colors: {
+                        brand: {
+                            50:  '#eef2ff',
+                            100: '#e0e7ff',
+                            400: '#818cf8',
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                            700: '#4338ca',
+                        },
+                    },
+                },
+            },
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        /* Subtle gradient background */
+        .bg-grid {
+            background-image:
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.15), transparent);
+        }
+
+        /* Glassmorphism card */
+        .glass-card {
+            background: rgba(17, 24, 39, 0.7);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(75, 85, 99, 0.3);
+        }
+
+        /* Glow ring around header icon */
+        .glow-ring {
+            box-shadow: 0 0 20px rgba(99, 102, 241, 0.4),
+                        0 0 60px rgba(99, 102, 241, 0.1);
+        }
+
+        /* Smooth row appear animation */
+        @keyframes fadeSlideIn {
+            from { opacity: 0; transform: translateY(-6px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        tbody tr {
+            animation: fadeSlideIn 0.3s ease-out;
+        }
+
+        /* Pulse dot for live indicator */
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%      { opacity: 0.5; transform: scale(0.75); }
+        }
+        .pulse-dot {
+            animation: pulse-dot 2s ease-in-out infinite;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
+        /* Hover row highlight */
+        tbody tr:hover {
+            background: rgba(99, 102, 241, 0.06) !important;
+        }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen bg-grid">
+
+    <!-- Header -->
+    <header class="border-b border-gray-800/60 sticky top-0 z-50 bg-gray-950/80 backdrop-blur-xl">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+
+                <!-- Logo & title -->
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center glow-ring">
+                        <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h1 class="text-lg font-semibold tracking-tight text-white">PocketSentry</h1>
+                        <p class="text-xs text-gray-500 -mt-0.5">Drop-in Error Tracker</p>
+                    </div>
+                </div>
+
+                <!-- Live indicator -->
+                <div class="flex items-center gap-2 text-xs text-gray-400">
+                    <span class="relative flex h-2 w-2">
+                        <span class="pulse-dot absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <span>Live</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+        <!-- Stats bar (placeholder for future) -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+            <div class="glass-card rounded-2xl p-5">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Status</p>
+                <p class="mt-1 text-2xl font-bold text-emerald-400">Listening</p>
+            </div>
+            <div class="glass-card rounded-2xl p-5">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Endpoint</p>
+                <p class="mt-1 text-sm font-mono text-gray-300 truncate">/api/{project_id}/envelope/</p>
+            </div>
+            <div class="glass-card rounded-2xl p-5">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Protocol</p>
+                <p class="mt-1 text-sm text-gray-300">Sentry SDK Compatible</p>
+            </div>
+        </div>
+
+        <!-- Events table -->
+        <div class="glass-card rounded-2xl overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-800/60 flex items-center justify-between">
+                <h2 class="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                    <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
+                    </svg>
+                    Recent Events
+                </h2>
+                <span class="text-xs text-gray-600">auto-refresh every 2s</span>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm text-left" id="events-table">
+                    <thead>
+                        <tr class="text-xs uppercase tracking-wider text-gray-500 border-b border-gray-800/40">
+                            <th class="px-6 py-3 font-medium">Time</th>
+                            <th class="px-6 py-3 font-medium">Project</th>
+                            <th class="px-6 py-3 font-medium">Platform</th>
+                            <th class="px-6 py-3 font-medium">Level</th>
+                            <th class="px-6 py-3 font-medium">Message</th>
+                        </tr>
+                    </thead>
+                    <tbody
+                        hx-get="/api/events"
+                        hx-trigger="load, every 2s"
+                        hx-swap="innerHTML"
+                    >
+                        <!-- HTMX will fill this -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 mt-4">
+        <p class="text-center text-xs text-gray-700">
+            PocketSentry &mdash; open-source, self-hosted, ultra-lightweight error tracker.
+        </p>
+    </footer>
+
+</body>
+</html>
