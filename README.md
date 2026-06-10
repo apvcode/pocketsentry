@@ -175,10 +175,12 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 0.1.0-dev
+  🛡️  Version     : 1.0.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1
+  🔓 Auth        : disabled
+  🗑️  Retention   : 30 days
   ──────────────────────────────────────────────────
 
   Point your Sentry SDK to the DSN above.
@@ -351,6 +353,27 @@ func main() {
 Также поддерживаются переменные окружения `PORT` и `DB_PATH` (флаги имеют приоритет).
 
 Сервер поддерживает **Graceful Shutdown**: нажми `Ctrl+C`, и он корректно завершит текущие запросы, закроет базу данных и выйдет с кодом 0.
+
+```
+$ ./pocketsentry --port 9090 --db /data/errors.db
+
+   ___           _        _   ___            _
+  | _ \ ___  __ | | __ __| |_/ __| ___ _ __ | |_ _ _ _  _
+  |  _// _ \/ _|| |/ // _| __\__ \/ _ \ '_ \|  _| '_| || |
+  |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
+                                                   |__/
+  ──────────────────────────────────────────────────
+  🛡️  Version     : 1.0.0
+  🌐 Dashboard   : http://localhost:9090
+  📦 Database    : /data/errors.db
+  🔗 DSN         : http://public@localhost:9090/1
+  🔓 Auth        : disabled
+  🗑️  Retention   : 30 days
+  ──────────────────────────────────────────────────
+
+  Point your Sentry SDK to the DSN above.
+  Press Ctrl+C to stop.
+```
 
 ### 🔨 Сборка из исходников
 
