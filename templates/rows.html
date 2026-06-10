@@ -1,8 +1,8 @@
 {{range .}}
 <tr class="border-b border-gray-800/30 transition-colors duration-150">
-    <!-- Time -->
+    <!-- Last Seen -->
     <td class="px-6 py-3.5 whitespace-nowrap">
-        <span class="text-xs text-gray-400 font-mono">{{.Timestamp}}</span>
+        <span class="text-xs text-gray-400 font-mono">{{.LastSeen}}</span>
     </td>
 
     <!-- Project -->
@@ -37,6 +37,17 @@
         {{end}}
     </td>
 
+    <!-- Count badge -->
+    <td class="px-6 py-3.5 whitespace-nowrap">
+        {{if gt .Count 1}}
+        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-mono font-medium bg-gray-800 text-gray-400 ring-1 ring-gray-700/50">
+            ×{{.Count}}
+        </span>
+        {{else}}
+        <span class="text-xs text-gray-600">1</span>
+        {{end}}
+    </td>
+
     <!-- Message (truncated) -->
     <td class="px-6 py-3.5 max-w-md">
         <p class="text-sm text-gray-300 truncate" title="{{.Message}}">{{.Message}}</p>
@@ -44,7 +55,7 @@
 </tr>
 {{else}}
 <tr>
-    <td colspan="5" class="px-6 py-16 text-center">
+    <td colspan="6" class="px-6 py-16 text-center">
         <div class="flex flex-col items-center gap-3">
             <svg class="w-10 h-10 text-gray-700" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />

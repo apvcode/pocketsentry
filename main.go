@@ -84,19 +84,32 @@ func initDB(path string) error {
 		level       TEXT     NOT NULL DEFAULT 'error',
 		platform    TEXT     NOT NULL DEFAULT '',
 		message     TEXT     NOT NULL DEFAULT '',
-		raw_payload TEXT     NOT NULL
+		raw_payload TEXT     NOT NULL,
+		count       INTEGER  NOT NULL DEFAULT 1,
+		last_seen   DATETIME NOT NULL DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
 	CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_event ON events(project_id, message, level);
 	`
 	if _, err := db.Exec(ddl); err != nil {
 		return fmt.Errorf("create table: %w", err)
 	}
 
+	// Migrate: add columns if upgrading from an older schema.
+	migrations := []string{
+		"ALTER TABLE events ADD COLUMN count INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE events ADD COLUMN last_seen DATETIME NOT NULL DEFAULT ''",
+	}
+	for _, m := range migrations {
+		_, _ = db.Exec(m) // ignore "duplicate column" errors
+	}
+
 	return nil
 }
 
-// saveEvent inserts a parsed event into the events table.
+// saveEvent inserts a new event or increments the counter of an existing
+// duplicate. Duplicates are identified by (project_id, message, level).
 func saveEvent(ev SentryEvent, projectID, rawPayload string) error {
 	if ev.EventID == "" {
 		ev.EventID = generateUUID()
@@ -113,17 +126,23 @@ func saveEvent(ev SentryEvent, projectID, rawPayload string) error {
 			ts = parsed.UTC()
 		}
 	}
+	tsStr := ts.Format(time.RFC3339)
 
 	_, err := db.Exec(
-		`INSERT OR IGNORE INTO events (id, project_id, timestamp, level, platform, message, raw_payload)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		ev.EventID, projectID, ts.Format(time.RFC3339), ev.Level, ev.Platform, ev.Message, rawPayload,
+		`INSERT INTO events (id, project_id, timestamp, level, platform, message, raw_payload, count, last_seen)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+		 ON CONFLICT(project_id, message, level) DO UPDATE SET
+		   count     = count + 1,
+		   last_seen = ?,
+		   raw_payload = ?`,
+		ev.EventID, projectID, tsStr, ev.Level, ev.Platform, ev.Message, rawPayload, tsStr,
+		tsStr, rawPayload,
 	)
 	if err != nil {
-		return fmt.Errorf("insert event: %w", err)
+		return fmt.Errorf("upsert event: %w", err)
 	}
-	log.Printf("event id=%s project=%s level=%s msg=%q",
-		ev.EventID, projectID, ev.Level, truncate(ev.Message, 80))
+	log.Printf("event project=%s level=%s msg=%q",
+		projectID, ev.Level, truncate(ev.Message, 80))
 	return nil
 }
 
@@ -135,10 +154,11 @@ func saveEvent(ev SentryEvent, projectID, rawPayload string) error {
 type EventRow struct {
 	ID        string
 	ProjectID string
-	Timestamp string
+	LastSeen  string
 	Level     string
 	Platform  string
 	Message   string
+	Count     int
 }
 
 // queryEvents returns the latest events for the dashboard.
@@ -147,12 +167,13 @@ func queryEvents(limit int) ([]EventRow, error) {
 		SELECT
 			COALESCE(id, ''),
 			COALESCE(project_id, ''),
-			COALESCE(timestamp, ''),
+			COALESCE(CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END, ''),
 			COALESCE(level, 'error'),
 			COALESCE(platform, ''),
-			COALESCE(message, '')
+			COALESCE(message, ''),
+			COALESCE(count, 1)
 		FROM events
-		ORDER BY timestamp DESC
+		ORDER BY CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END DESC
 		LIMIT ?
 	`
 	rows, err := db.Query(q, limit)
@@ -164,11 +185,11 @@ func queryEvents(limit int) ([]EventRow, error) {
 	var result []EventRow
 	for rows.Next() {
 		var ev EventRow
-		if err := rows.Scan(&ev.ID, &ev.ProjectID, &ev.Timestamp, &ev.Level, &ev.Platform, &ev.Message); err != nil {
-			log.Printf("⚠️  scan row: %v", err)
+		if err := rows.Scan(&ev.ID, &ev.ProjectID, &ev.LastSeen, &ev.Level, &ev.Platform, &ev.Message, &ev.Count); err != nil {
+			log.Printf("scan row: %v", err)
 			continue
 		}
-		ev.Timestamp = formatTimestamp(ev.Timestamp)
+		ev.LastSeen = formatTimestamp(ev.LastSeen)
 		result = append(result, ev)
 	}
 	if err := rows.Err(); err != nil {

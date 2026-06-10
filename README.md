@@ -50,7 +50,7 @@ You just wanted to catch a `TypeError` in your side project. Not deploy a distri
 |---|---|---|
 | **Deploy** | 40+ containers, Compose/K8s | **1 file, `./pocketsentry`** |
 | **RAM** | 16 GB+ | **< 20 MB** |
-| **Database** | PostgreSQL + ClickHouse + Redis | **SQLite (WAL mode)** |
+| **Database** | PostgreSQL + ClickHouse + Redis | **SQLite (WAL mode + Deduplication)** |
 | **Binary size** | Gigabytes of images | **~18 MB** |
 | **Dependencies** | Kafka, Zookeeper, Snuba… | **Zero** |
 | **Time to deploy** | 30+ minutes | **3 seconds** |
@@ -62,6 +62,7 @@ You just wanted to catch a `TypeError` in your side project. Not deploy a distri
 - 📦 **Single binary** — templates embedded via `go:embed`, zero external files
 - 🪶 **Ultra-lightweight** — ~18 MB binary, < 20 MB RAM at runtime
 - 🗄️ **Embedded SQLite** — pure-Go driver ([modernc.org/sqlite](https://modernc.org/sqlite)), no CGO hassle
+- 🔄 **Auto-deduplication** — identical errors are grouped by `(project, message, level)` with a hit counter
 - 📊 **Real-time dashboard** — dark-themed UI with HTMX auto-refresh (every 2s)
 - 🔒 **Graceful shutdown** — SIGINT/SIGTERM → drain connections → close DB
 - 🌐 **Full CORS** — browser SDKs work without proxy hacks
@@ -228,7 +229,7 @@ go build -o pocketsentry .
 |---|---|---|
 | **Деплой** | 40+ контейнеров, Compose/K8s | **1 файл, `./pocketsentry`** |
 | **RAM** | 16+ ГБ | **< 20 МБ** |
-| **База данных** | PostgreSQL + ClickHouse + Redis | **SQLite (WAL-режим)** |
+| **База данных** | PostgreSQL + ClickHouse + Redis | **SQLite (WAL-режим + Дедупликация)** |
 | **Размер** | Гигабайты образов | **~18 МБ** |
 | **Зависимости** | Kafka, Zookeeper, Snuba… | **Ноль** |
 | **Время деплоя** | 30+ минут | **3 секунды** |
@@ -240,6 +241,7 @@ go build -o pocketsentry .
 - 📦 **Один бинарник** — шаблоны встроены через `go:embed`, никаких внешних файлов
 - 🪶 **Ультралёгкий** — ~18 МБ бинарник, < 20 МБ RAM в рантайме
 - 🗄️ **Встроенный SQLite** — pure-Go драйвер ([modernc.org/sqlite](https://modernc.org/sqlite)), без CGO
+- 🔄 **Авто-дедупликация** — одинаковые ошибки группируются по `(project, message, level)` со счётчиком
 - 📊 **Дашборд реального времени** — тёмная тема, HTMX автообновление каждые 2 секунды
 - 🔒 **Graceful Shutdown** — SIGINT/SIGTERM → дождаться запросов → закрыть БД
 - 🌐 **Полный CORS** — браузерные SDK работают без проксирования
