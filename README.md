@@ -64,6 +64,10 @@ You just wanted to catch a `TypeError` in your side project. Not deploy a distri
 - 🗄️ **Embedded SQLite** — pure-Go driver ([modernc.org/sqlite](https://modernc.org/sqlite)), no CGO hassle
 - 🔄 **Auto-deduplication** — identical errors are grouped by `(project, message, level)` with a hit counter
 - 📊 **Real-time dashboard** — dark-themed UI with HTMX auto-refresh (every 2s)
+- 🔍 **Detailed Stacktraces** — Clickable rows to view full error details and raw JSON payloads
+- 📈 **Analytics & Filters** — Interactive charts and instant HTMX filtering by error level
+- 🛡️ **Basic Auth** — Built-in dashboard protection via username and password (ingestion API remains open)
+- 🧹 **Retention Policy** — Background auto-cleanup of old events from the database
 - 🔒 **Graceful shutdown** — SIGINT/SIGTERM → drain connections → close DB
 - 🌐 **Full CORS** — browser SDKs work without proxy hacks
 - 🗜️ **Gzip support** — transparent decompression of compressed payloads
@@ -154,6 +158,9 @@ func main() {
 |---|---|---|
 | `--port` | `8080` | HTTP server port |
 | `--db` | `pocketsentry.db` | Path to SQLite database file |
+| `--admin-user` | `""` | Dashboard admin username (empty = auth disabled) |
+| `--admin-pass` | `""` | Dashboard admin password |
+| `--retention-days` | `30` | Auto-delete events older than N days (0 = disabled) |
 
 Environment variables `PORT` and `DB_PATH` are also supported (flags take priority).
 
@@ -192,12 +199,12 @@ go build -o pocketsentry .
 
 ### 🗺️ Roadmap
 
-- [ ] Event detail page with full stack trace
+- [x] Event detail page with full stack trace
+- [x] Retention policies (auto-delete old events)
+- [x] Authentication
 - [ ] Project management (create/delete projects)
-- [ ] Retention policies (auto-delete old events)
 - [ ] Source maps support
 - [ ] Docker image
-- [ ] Authentication
 
 ### 📄 License
 
@@ -243,6 +250,10 @@ go build -o pocketsentry .
 - 🗄️ **Встроенный SQLite** — pure-Go драйвер ([modernc.org/sqlite](https://modernc.org/sqlite)), без CGO
 - 🔄 **Авто-дедупликация** — одинаковые ошибки группируются по `(project, message, level)` со счётчиком
 - 📊 **Дашборд реального времени** — тёмная тема, HTMX автообновление каждые 2 секунды
+- 🔍 **Detailed Stacktraces** — Кликабельные строки для просмотра детальной информации об ошибке и сырого JSON-пейлоада
+- 📈 **Analytics & Filters** — Интерактивные графики и мгновенная фильтрация ошибок по уровням (HTMX)
+- 🛡️ **Basic Auth** — Встроенная защита дашборда логином и паролем (API для приема логов остается открытым)
+- 🧹 **Retention Policy** — Фоновая авто-очистка старых логов из базы данных
 - 🔒 **Graceful Shutdown** — SIGINT/SIGTERM → дождаться запросов → закрыть БД
 - 🌐 **Полный CORS** — браузерные SDK работают без проксирования
 - 🗜️ **Gzip** — прозрачная декомпрессия сжатых payload'ов
@@ -333,6 +344,9 @@ func main() {
 |---|---|---|
 | `--port` | `8080` | Порт HTTP-сервера |
 | `--db` | `pocketsentry.db` | Путь к файлу базы данных SQLite |
+| `--admin-user` | `""` | Логин для защиты дашборда (пусто = отключено) |
+| `--admin-pass` | `""` | Пароль для дашборда |
+| `--retention-days` | `30` | Количество дней хранения логов (0 = хранить вечно) |
 
 Также поддерживаются переменные окружения `PORT` и `DB_PATH` (флаги имеют приоритет).
 
@@ -352,12 +366,12 @@ go build -o pocketsentry .
 
 ### 🗺️ Дорожная карта
 
-- [ ] Страница детального просмотра ошибки со стектрейсом
+- [x] Страница детального просмотра ошибки со стектрейсом
+- [x] Политика хранения (авто-удаление старых событий)
+- [x] Аутентификация
 - [ ] Управление проектами (создание/удаление)
-- [ ] Политика хранения (авто-удаление старых событий)
 - [ ] Поддержка Source Maps
 - [ ] Docker-образ
-- [ ] Аутентификация
 
 ### 📄 Лицензия
 

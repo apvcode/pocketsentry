@@ -31,8 +31,9 @@ var templateFS embed.FS
 
 // Parsed templates (initialized once at startup).
 var (
-	tmplIndex *template.Template
-	tmplRows  *template.Template
+	tmplIndex  *template.Template
+	tmplRows   *template.Template
+	tmplDetail *template.Template
 )
 
 // initTemplates parses the embedded templates once at startup. This is both
@@ -47,6 +48,10 @@ func initTemplates() error {
 	tmplRows, err = template.ParseFS(templateFS, "templates/rows.html")
 	if err != nil {
 		return fmt.Errorf("parse rows.html: %w", err)
+	}
+	tmplDetail, err = template.ParseFS(templateFS, "templates/detail.html")
+	if err != nil {
+		return fmt.Errorf("parse detail.html: %w", err)
 	}
 	return nil
 }
@@ -162,21 +167,44 @@ type EventRow struct {
 }
 
 // queryEvents returns the latest events for the dashboard.
-func queryEvents(limit int) ([]EventRow, error) {
-	const q = `
-		SELECT
-			COALESCE(id, ''),
-			COALESCE(project_id, ''),
-			COALESCE(CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END, ''),
-			COALESCE(level, 'error'),
-			COALESCE(platform, ''),
-			COALESCE(message, ''),
-			COALESCE(count, 1)
-		FROM events
-		ORDER BY CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END DESC
-		LIMIT ?
-	`
-	rows, err := db.Query(q, limit)
+func queryEvents(limit int, levelFilter string) ([]EventRow, error) {
+	var q string
+	var args []interface{}
+
+	if levelFilter != "" && levelFilter != "All" {
+		q = `
+			SELECT
+				COALESCE(id, ''),
+				COALESCE(project_id, ''),
+				COALESCE(CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END, ''),
+				COALESCE(level, 'error'),
+				COALESCE(platform, ''),
+				COALESCE(message, ''),
+				COALESCE(count, 1)
+			FROM events
+			WHERE level = ?
+			ORDER BY CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END DESC
+			LIMIT ?
+		`
+		args = append(args, levelFilter, limit)
+	} else {
+		q = `
+			SELECT
+				COALESCE(id, ''),
+				COALESCE(project_id, ''),
+				COALESCE(CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END, ''),
+				COALESCE(level, 'error'),
+				COALESCE(platform, ''),
+				COALESCE(message, ''),
+				COALESCE(count, 1)
+			FROM events
+			ORDER BY CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END DESC
+			LIMIT ?
+		`
+		args = append(args, limit)
+	}
+
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query events: %w", err)
 	}
@@ -198,6 +226,50 @@ func queryEvents(limit int) ([]EventRow, error) {
 	return result, nil
 }
 
+// ---------- Stats ----------
+
+// StatPoint represents a single day's count of events.
+type StatPoint struct {
+	Date  string `json:"date"`
+	Count int    `json:"count"`
+}
+
+// queryStats returns the total count of events per day for the last 7 days.
+func queryStats() ([]StatPoint, error) {
+	const q = `
+		WITH RECURSIVE dates(date) AS (
+			SELECT date('now', '-6 days')
+			UNION ALL
+			SELECT date(date, '+1 day')
+			FROM dates
+			WHERE date < date('now')
+		)
+		SELECT
+			d.date,
+			COALESCE(SUM(e.count), 0)
+		FROM dates d
+		LEFT JOIN events e ON date(CASE WHEN e.last_seen = '' THEN e.timestamp ELSE e.last_seen END) = d.date
+		GROUP BY d.date
+		ORDER BY d.date ASC
+	`
+	rows, err := db.Query(q)
+	if err != nil {
+		return nil, fmt.Errorf("query stats: %w", err)
+	}
+	defer rows.Close()
+
+	var result []StatPoint
+	for rows.Next() {
+		var sp StatPoint
+		if err := rows.Scan(&sp.Date, &sp.Count); err != nil {
+			log.Printf("scan stat: %v", err)
+			continue
+		}
+		result = append(result, sp)
+	}
+	return result, nil
+}
+
 // formatTimestamp converts an RFC3339 timestamp into a shorter, more readable
 // format for the dashboard (e.g. "2026-06-09 14:12:23").
 func formatTimestamp(raw string) string {
@@ -206,6 +278,195 @@ func formatTimestamp(raw string) string {
 		return raw
 	}
 	return t.Format("2006-01-02 15:04:05")
+}
+
+// ---------- Event Detail ----------
+
+// StackFrame represents a single frame in a stack trace.
+type StackFrame struct {
+	Filename    string   `json:"filename"`
+	Function    string   `json:"function"`
+	Module      string   `json:"module"`
+	Lineno      int      `json:"lineno"`
+	Colno       int      `json:"colno"`
+	AbsPath     string   `json:"abs_path"`
+	ContextLine string   `json:"context_line"`
+	PreContext  []string `json:"pre_context"`
+	PostContext []string `json:"post_context"`
+	InApp       bool     `json:"in_app"`
+}
+
+// rawExceptionValue extends the ingestion struct with stacktrace data.
+type rawExceptionValue struct {
+	Type       string `json:"type"`
+	Value      string `json:"value"`
+	Stacktrace *struct {
+		Frames []StackFrame `json:"frames"`
+	} `json:"stacktrace,omitempty"`
+}
+
+// rawPayloadDetail is used to extract rich metadata from the stored JSON.
+type rawPayloadDetail struct {
+	EventID     string            `json:"event_id"`
+	Timestamp   string            `json:"timestamp"`
+	Level       string            `json:"level"`
+	Platform    string            `json:"platform"`
+	ServerName  string            `json:"server_name"`
+	Environment string            `json:"environment"`
+	Release     string            `json:"release"`
+	Tags        map[string]string `json:"tags"`
+	Contexts    map[string]json.RawMessage `json:"contexts"`
+	User        *struct {
+		IP    string `json:"ip_address"`
+		Email string `json:"email"`
+	} `json:"user,omitempty"`
+	Request *struct {
+		URL    string            `json:"url"`
+		Method string            `json:"method"`
+		Headers map[string]string `json:"headers"`
+	} `json:"request,omitempty"`
+	Exception *struct {
+		Values []rawExceptionValue `json:"values"`
+	} `json:"exception,omitempty"`
+	SDK *struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"sdk,omitempty"`
+}
+
+// EventDetail is the struct passed to the detail.html template.
+type EventDetail struct {
+	ID          string
+	ProjectID   string
+	Timestamp   string
+	LastSeen    string
+	Level       string
+	Platform    string
+	Message     string
+	Count       int
+
+	ExcType     string
+	ExcValue    string
+
+	OS          string
+	Browser     string
+	Runtime     string
+	ServerName  string
+	Environment string
+	Release     string
+	IP          string
+	URL         string
+	SDKName     string
+
+	Frames      []StackFrame
+	HasFrames   bool
+	Tags        map[string]string
+	HasTags     bool
+	RawJSON     string
+}
+
+// queryEventByID fetches a single event from the database.
+func queryEventByID(id string) (*EventDetail, error) {
+	const q = `
+		SELECT
+			COALESCE(id, ''),
+			COALESCE(project_id, ''),
+			COALESCE(timestamp, ''),
+			COALESCE(CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END, ''),
+			COALESCE(level, 'error'),
+			COALESCE(platform, ''),
+			COALESCE(message, ''),
+			COALESCE(count, 1),
+			COALESCE(raw_payload, '{}')
+		FROM events WHERE id = ?
+	`
+	var ev EventDetail
+	var rawPayload string
+	err := db.QueryRow(q, id).Scan(
+		&ev.ID, &ev.ProjectID, &ev.Timestamp, &ev.LastSeen,
+		&ev.Level, &ev.Platform, &ev.Message, &ev.Count, &rawPayload,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ev.Timestamp = formatTimestamp(ev.Timestamp)
+	ev.LastSeen = formatTimestamp(ev.LastSeen)
+
+	// Pretty-print raw JSON for display.
+	var buf bytes.Buffer
+	if json.Indent(&buf, []byte(rawPayload), "", "  ") == nil {
+		ev.RawJSON = buf.String()
+	} else {
+		ev.RawJSON = rawPayload
+	}
+
+	// Parse metadata from raw payload.
+	var raw rawPayloadDetail
+	if json.Unmarshal([]byte(rawPayload), &raw) == nil {
+		ev.ServerName = raw.ServerName
+		ev.Environment = raw.Environment
+		ev.Release = raw.Release
+
+		if raw.User != nil {
+			ev.IP = raw.User.IP
+		}
+		if raw.Request != nil {
+			ev.URL = raw.Request.URL
+		}
+		if raw.SDK != nil {
+			ev.SDKName = raw.SDK.Name + " " + raw.SDK.Version
+		}
+		if raw.Tags != nil && len(raw.Tags) > 0 {
+			ev.Tags = raw.Tags
+			ev.HasTags = true
+		}
+
+		// Extract OS / Browser / Runtime from contexts.
+		if raw.Contexts != nil {
+			ev.OS = extractContextField(raw.Contexts, "os", "name", "version")
+			ev.Browser = extractContextField(raw.Contexts, "browser", "name", "version")
+			ev.Runtime = extractContextField(raw.Contexts, "runtime", "name", "version")
+		}
+
+		// Extract exception type/value and stack frames.
+		if raw.Exception != nil && len(raw.Exception.Values) > 0 {
+			exc := raw.Exception.Values[0]
+			ev.ExcType = exc.Type
+			ev.ExcValue = exc.Value
+			if exc.Stacktrace != nil && len(exc.Stacktrace.Frames) > 0 {
+				// Sentry sends frames bottom-up; reverse for display.
+				frames := exc.Stacktrace.Frames
+				for i, j := 0, len(frames)-1; i < j; i, j = i+1, j-1 {
+					frames[i], frames[j] = frames[j], frames[i]
+				}
+				ev.Frames = frames
+				ev.HasFrames = true
+			}
+		}
+	}
+
+	return &ev, nil
+}
+
+// extractContextField reads "name" and "version" from a context entry.
+func extractContextField(contexts map[string]json.RawMessage, key, nameKey, versionKey string) string {
+	data, ok := contexts[key]
+	if !ok {
+		return ""
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(data, &m) != nil {
+		return ""
+	}
+	name, _ := m[nameKey].(string)
+	version, _ := m[versionKey].(string)
+	if name == "" {
+		return ""
+	}
+	if version != "" {
+		return name + " " + version
+	}
+	return name
 }
 
 // ---------- Sentry Event Parsing ----------
@@ -400,6 +661,30 @@ func gzipDecodeMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// Global auth credentials (set from CLI flags in main).
+var (
+	adminUser string
+	adminPass string
+)
+
+// basicAuthMiddleware protects UI routes with HTTP Basic Authentication.
+// If adminUser and adminPass are both empty, it passes requests through.
+func basicAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if adminUser == "" && adminPass == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != adminUser || pass != adminPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="PocketSentry"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ---------- Handlers ----------
 
 // indexHandler serves the main dashboard page.
@@ -412,15 +697,16 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 // eventsHandler returns rendered <tr> rows for the HTMX table.
 func eventsHandler(w http.ResponseWriter, r *http.Request) {
-	events, err := queryEvents(50)
+	level := r.URL.Query().Get("level")
+	events, err := queryEvents(50, level)
 	if err != nil {
-		log.Printf("❌ query events: %v", err)
+		log.Printf("query events: %v", err)
 		events = []EventRow{}
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmplRows.Execute(w, events); err != nil {
-		log.Printf("❌ rows template execute error: %v", err)
+		log.Printf("rows template error: %v", err)
 	}
 }
 
@@ -482,6 +768,41 @@ func respondOK(w http.ResponseWriter) {
 	respondWithID(w, generateUUID())
 }
 
+// eventDetailHandler serves the detail page for a single event.
+func eventDetailHandler(w http.ResponseWriter, r *http.Request) {
+	// Extract event ID from /events/{id}
+	id := strings.TrimPrefix(r.URL.Path, "/events/")
+	id = strings.TrimSuffix(id, "/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	ev, err := queryEventByID(id)
+	if err != nil {
+		log.Printf("event detail: %v", err)
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmplDetail.Execute(w, ev); err != nil {
+		log.Printf("detail template error: %v", err)
+	}
+}
+
+// statsHandler returns JSON for the ApexCharts graph.
+func statsHandler(w http.ResponseWriter, r *http.Request) {
+	stats, err := queryStats()
+	if err != nil {
+		log.Printf("query stats: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(stats)
+}
+
 // respondWithID sends a 200 JSON response with the given event ID.
 func respondWithID(w http.ResponseWriter, id string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -494,23 +815,56 @@ func respondWithID(w http.ResponseWriter, id string) {
 func newRouter() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// UI routes — protected by Basic Auth.
+	protected := http.NewServeMux()
+	protected.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
 		indexHandler(w, r)
 	})
-
-	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+	protected.HandleFunc("/events/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			eventDetailHandler(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	protected.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			eventsHandler(w, r)
 			return
 		}
 		http.NotFound(w, r)
 	})
+	protected.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			statsHandler(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
 
+	// Mount protected UI behind auth middleware.
+	mux.Handle("/", basicAuthMiddleware(protected))
+	mux.Handle("/events/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protected.ServeHTTP(w, r)
+	})))
+	mux.Handle("/api/events", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protected.ServeHTTP(w, r)
+	})))
+
+	mux.Handle("/api/stats", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protected.ServeHTTP(w, r)
+	})))
+
+	// Public ingestion routes — NO auth.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		// Exclude UI routes from this handler (handled above with auth).
+		if r.URL.Path == "/api/events" || r.URL.Path == "/api/stats" {
+			return
+		}
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/store/"):
 			storeHandler(w, r)
@@ -534,13 +888,23 @@ const banner = `
                                                    |__/
 `
 
-func printBanner(port, dbPath string) {
+func printBanner(port, dbPath, user string, retDays int) {
 	fmt.Print(banner)
 	fmt.Println("  ──────────────────────────────────────────────────")
-	fmt.Printf("  🛡️  Version     : 0.1.0-dev\n")
+	fmt.Printf("  🛡️  Version     : 1.0.0\n")
 	fmt.Printf("  🌐 Dashboard   : http://localhost:%s\n", port)
 	fmt.Printf("  📦 Database    : %s\n", dbPath)
 	fmt.Printf("  🔗 DSN         : http://public@localhost:%s/1\n", port)
+	if user != "" {
+		fmt.Printf("  🔒 Auth        : enabled (user: %s)\n", user)
+	} else {
+		fmt.Printf("  🔓 Auth        : disabled\n")
+	}
+	if retDays > 0 {
+		fmt.Printf("  🗑️  Retention   : %d days\n", retDays)
+	} else {
+		fmt.Printf("  ♾️  Retention   : unlimited\n")
+	}
 	fmt.Println("  ──────────────────────────────────────────────────")
 	fmt.Println()
 	fmt.Println("  Point your Sentry SDK to the DSN above.")
@@ -554,6 +918,9 @@ func main() {
 	// CLI flags.
 	port := flag.String("port", "8080", "HTTP server port")
 	dbPath := flag.String("db", "pocketsentry.db", "Path to SQLite database file")
+	flagUser := flag.String("admin-user", "", "Dashboard admin username (empty = auth disabled)")
+	flagPass := flag.String("admin-pass", "", "Dashboard admin password")
+	retentionDays := flag.Int("retention-days", 30, "Auto-delete events older than N days (0 = disabled)")
 	flag.Parse()
 
 	// Override from env vars (flags take priority if explicitly set).
@@ -564,18 +931,22 @@ func main() {
 		*dbPath = envDB
 	}
 
+	// Set global auth credentials.
+	adminUser = *flagUser
+	adminPass = *flagPass
+
 	// Initialize templates (from embedded FS).
 	if err := initTemplates(); err != nil {
-		log.Fatalf("❌ Template init failed: %v", err)
+		log.Fatalf("Template init failed: %v", err)
 	}
 
 	// Initialize database.
 	if err := initDB(*dbPath); err != nil {
-		log.Fatalf("❌ Database init failed: %v", err)
+		log.Fatalf("Database init failed: %v", err)
 	}
 
 	// Print startup banner.
-	printBanner(*port, *dbPath)
+	printBanner(*port, *dbPath, adminUser, *retentionDays)
 
 	// Create HTTP server.
 	addr := ":" + *port
@@ -588,30 +959,71 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
+	// Start retention cleanup goroutine.
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	if *retentionDays > 0 {
+		go runRetentionCleanup(cleanupCtx, *retentionDays)
+	}
+
 	// Start server in a goroutine.
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("❌ Server error: %v", err)
+			log.Fatalf("Server error: %v", err)
 		}
 	}()
 
 	// Block until we receive a shutdown signal.
 	sig := <-quit
-	log.Printf("⏳ Received %v, shutting down gracefully...", sig)
+	log.Printf("Received %v, shutting down gracefully...", sig)
+
+	// Stop the retention worker.
+	cleanupCancel()
 
 	// Give in-flight requests up to 10 seconds to complete.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("⚠️  HTTP shutdown error: %v", err)
+		log.Printf("HTTP shutdown error: %v", err)
 	}
 
 	if err := db.Close(); err != nil {
-		log.Printf("⚠️  Database close error: %v", err)
+		log.Printf("Database close error: %v", err)
 	}
 
-	log.Println("✅ PocketSentry stopped gracefully.")
+	log.Println("PocketSentry stopped.")
+}
+
+// runRetentionCleanup periodically deletes events older than retentionDays.
+func runRetentionCleanup(ctx context.Context, days int) {
+	// Run once at startup, then every hour.
+	cleanup := func() {
+		res, err := db.Exec(
+			`DELETE FROM events WHERE
+			 CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END
+			 < datetime('now', '-' || ? || ' days')`, days,
+		)
+		if err != nil {
+			log.Printf("[retention] cleanup error: %v", err)
+			return
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("[retention] deleted %d events older than %d days", n, days)
+		}
+	}
+
+	cleanup()
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanup()
+		}
+	}
 }
 
 // isFlagPassed checks if a flag was explicitly provided on the command line.

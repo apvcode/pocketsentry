@@ -1,5 +1,5 @@
 {{range .}}
-<tr class="border-b border-gray-800/30 transition-colors duration-150">
+<tr id="event-{{.ID}}" class="border-b border-gray-800/30 transition-all duration-200 cursor-pointer hover:bg-gray-800/60 hover:shadow-lg hover:z-10 relative" onclick="window.location.href='/events/{{.ID}}'">
     <!-- Last Seen -->
     <td class="px-6 py-3.5 whitespace-nowrap">
         <span class="text-xs text-gray-400 font-mono">{{.LastSeen}}</span>
