@@ -72,13 +72,24 @@ You just wanted to catch a `TypeError` in your side project. Not deploy a distri
 - 🌐 **Full CORS** — browser SDKs work without proxy hacks
 - 🗜️ **Gzip support** — transparent decompression of compressed payloads
 - 🧩 **Both endpoints** — `/api/{id}/store/` (legacy) and `/api/{id}/envelope/` (modern)
+- 🏥 **Health Check** — `/health` endpoint for uptime monitoring and orchestration
+- 🔔 **Webhooks** — Instant error alerts in Telegram and Discord (only for new unique errors)
+- 🛠️ **Error Lifecycle** — Resolve errors directly from the dashboard (automatically reopens if the error reoccurs)
+- 📂 **Project Management** — Create isolated workspaces for your different apps and fetch dynamic DSNs.
+- 🗺️ **Source Maps** — Automatic demangling of minified JavaScript stacktraces via local `.map` files.
 
 ### 🚀 Quick Start
 
 **1. Download and run:**
 
+*Option A: Standalone Binary*
 ```bash
 ./pocketsentry --port 8080
+```
+
+*Option B: Docker*
+```bash
+docker-compose up -d
 ```
 
 That's it. Open [http://localhost:8080](http://localhost:8080) to see the dashboard.
@@ -161,6 +172,10 @@ func main() {
 | `--admin-user` | `""` | Dashboard admin username (empty = auth disabled) |
 | `--admin-pass` | `""` | Dashboard admin password |
 | `--retention-days` | `30` | Auto-delete events older than N days (0 = disabled) |
+| `--checkupd` | `false` | Check for a newer release on GitHub and update if confirmed |
+| `--discord-webhook-url`| `""` | Discord Webhook URL for error notifications |
+| `--tg-token` | `""` | Telegram Bot Token for error notifications |
+| `--tg-chat-id` | `""` | Telegram Chat ID for error notifications |
 
 Environment variables `PORT` and `DB_PATH` are also supported (flags take priority).
 
@@ -175,7 +190,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 1.0.0
+  🛡️  Version     : 1.1.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1
@@ -260,16 +275,27 @@ go build -o pocketsentry .
 - 🌐 **Полный CORS** — браузерные SDK работают без проксирования
 - 🗜️ **Gzip** — прозрачная декомпрессия сжатых payload'ов
 - 🧩 **Оба эндпоинта** — `/api/{id}/store/` (legacy) и `/api/{id}/envelope/` (modern)
+- 🏥 **Health Check** — эндпоинт `/health` для мониторинга аптайма и оркестрации
+- 🔔 **Уведомления** — Мгновенные алерты об ошибках в Telegram и Discord (только для новых уникальных ошибок)
+- 🛠️ **Жизненный цикл ошибок** — Возможность отмечать ошибки как «решенные» прямо из дашборда (автоматически переоткрываются, если баг повторится)
+- 📂 **Управление проектами** — Создание отдельных воркспейсов для разных приложений со своими DSN.
+- 🗺️ **Source Maps** — Автоматическая расшифровка минифицированных JS-ошибок (просто положите `.map` файлы в папку `sourcemaps/`).
 
 ### 🚀 Быстрый старт
 
 **1. Скачай и запусти:**
 
+*Вариант А: Обычный бинарник*
 ```bash
 ./pocketsentry --port 8080
 ```
 
-Готово. Открой [http://localhost:8080](http://localhost:8080), чтобы увидеть дашборд.
+*Вариант Б: Docker*
+```bash
+docker-compose up -d
+```
+
+Всё! Открой [http://localhost:8080](http://localhost:8080) и смотри дашборд.
 
 **2. Подключи свой SDK:**
 
@@ -349,6 +375,18 @@ func main() {
 | `--admin-user` | `""` | Логин для защиты дашборда (пусто = отключено) |
 | `--admin-pass` | `""` | Пароль для дашборда |
 | `--retention-days` | `30` | Количество дней хранения логов (0 = хранить вечно) |
+| `--checkupd` | `false` | Проверить наличие новой версии на GitHub и обновиться при подтверждении |
+| `--discord-webhook-url`| `""` | URL вебхука Discord для уведомлений об ошибках |
+| `--tg-token` | `""` | Токен Telegram-бота для уведомлений об ошибках |
+| `--tg-chat-id` | `""` | ID чата Telegram для уведомлений об ошибках |
+
+### 🗺️ Поддержка Source Maps
+
+PocketSentry умеет автоматически расшифровывать минифицированный JavaScript код из браузера, превращая его в читаемый исходный код с указанием реальных файлов и строк.
+Для этого используется максимально простой подход (без сложных загрузок через API):
+1. Создайте папку `sourcemaps` рядом с бинарником (или примонтируйте её как Volume в Docker).
+2. Положите туда ваши `.map` файлы (например, `main.min.js.map`).
+3. При открытии ошибки сервер автоматически найдет карту, восстановит оригинальный код и подсветит нужную строчку в красивом блоке кода прямо в UI.
 
 Также поддерживаются переменные окружения `PORT` и `DB_PATH` (флаги имеют приоритет).
 
@@ -363,7 +401,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 1.0.0
+  🛡️  Version     : 1.1.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1
@@ -392,9 +430,9 @@ go build -o pocketsentry .
 - [x] Страница детального просмотра ошибки со стектрейсом
 - [x] Политика хранения (авто-удаление старых событий)
 - [x] Аутентификация
-- [ ] Управление проектами (создание/удаление)
-- [ ] Поддержка Source Maps
-- [ ] Docker-образ
+- [x] Управление проектами (создание/удаление)
+- [x] Поддержка Source Maps
+- [x] Docker-образ
 
 ### 📄 Лицензия
 

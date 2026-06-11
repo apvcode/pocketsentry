@@ -87,6 +87,54 @@
         tbody tr:hover {
             background: rgba(99, 102, 241, 0.06) !important;
         }
+
+        /* Liquid Glass modal styles */
+        .liquid-glass-modal {
+            background: rgba(17, 24, 39, 0.55) !important;
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+        }
+
+        .liquid-glass-modal::backdrop {
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+
+        /* Smooth animation for the modal */
+        @keyframes modalShow {
+            from {
+                opacity: 0;
+                transform: scale(0.95) translateY(-12px);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+        }
+
+        @keyframes backdropShow {
+            from {
+                background: rgba(0, 0, 0, 0);
+                backdrop-filter: blur(0px);
+                -webkit-backdrop-filter: blur(0px);
+            }
+            to {
+                background: rgba(0, 0, 0, 0.5);
+                backdrop-filter: blur(8px);
+                -webkit-backdrop-filter: blur(8px);
+            }
+        }
+
+        .liquid-glass-modal[open] {
+            animation: modalShow 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+        }
+
+        .liquid-glass-modal[open]::backdrop {
+            animation: backdropShow 0.3s ease-out forwards;
+        }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen bg-grid">
@@ -124,19 +172,27 @@
     <!-- Main content -->
     <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
-        <!-- Stats bar (placeholder for future) -->
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+        <!-- Stats bar -->
+        <div class="grid grid-cols-1 sm:grid-cols-5 gap-4 mb-8">
             <div class="glass-card rounded-2xl p-5">
                 <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Status</p>
                 <p class="mt-1 text-2xl font-bold text-emerald-400">Listening</p>
             </div>
             <div class="glass-card rounded-2xl p-5">
                 <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Endpoint</p>
-                <p class="mt-1 text-sm font-mono text-gray-300 truncate">/api/{project_id}/envelope/</p>
+                <p class="mt-1 text-xs font-mono text-gray-300 truncate pt-1">/api/{project_id}/...</p>
             </div>
             <div class="glass-card rounded-2xl p-5">
-                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Protocol</p>
-                <p class="mt-1 text-sm text-gray-300">Sentry SDK Compatible</p>
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Unresolved Events</p>
+                <p class="mt-1 text-2xl font-bold text-emerald-400">{{.UnresolvedCount}} active</p>
+            </div>
+            <div class="glass-card rounded-2xl p-5">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Active Webhooks</p>
+                <p class="mt-1 text-sm font-mono text-gray-300 truncate pt-1">{{.Webhooks}}</p>
+            </div>
+            <div class="glass-card rounded-2xl p-5">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Retention Policy</p>
+                <p class="mt-1 text-sm text-gray-300 pt-1">{{.Retention}}</p>
             </div>
         </div>
 
@@ -153,14 +209,34 @@
 
         <!-- Events table -->
         <div class="glass-card rounded-2xl overflow-hidden shadow-lg">
-            <div class="px-6 py-4 border-b border-gray-800/60 flex items-center justify-between">
+            <div class="px-6 py-4 border-b border-gray-800/60 flex items-center justify-between flex-wrap gap-4">
                 <h2 class="text-sm font-semibold text-gray-200 flex items-center gap-2">
                     <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
                     </svg>
                     Recent Events
                 </h2>
-                <div class="flex items-center gap-4">
+                
+                <div class="flex items-center gap-3">
+                    <button onclick="document.getElementById('project-modal').showModal()" class="text-xs px-3 py-1.5 bg-gray-800 text-gray-300 hover:text-white border border-gray-700 hover:border-gray-600 rounded-lg transition-colors flex items-center gap-1.5">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+                        New Project
+                    </button>
+                    
+                    <input type="search" id="search-input" name="search" placeholder="Search by message or platform..." 
+                           class="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2 outline-none w-64"
+                           hx-get="/api/events" 
+                           hx-trigger="keyup changed delay:300ms, search" 
+                           hx-target="#events-tbody" 
+                           hx-include="#level-filter, #project-filter">
+                    
+                    <select id="project-filter" name="project" class="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2 outline-none">
+                        <option value="All">All Projects</option>
+                        {{range .Projects}}
+                        <option value="{{.ID}}">{{.Name}} (ID: {{.ID}})</option>
+                        {{end}}
+                    </select>
+
                     <select id="level-filter" name="level" class="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2 outline-none">
                         <option value="All">All Levels</option>
                         <option value="error">Error</option>
@@ -181,12 +257,13 @@
                             <th class="px-6 py-3 font-medium">Level</th>
                             <th class="px-6 py-3 font-medium">Count</th>
                             <th class="px-6 py-3 font-medium">Message</th>
+                            <th class="px-6 py-3 font-medium text-right">Action</th>
                         </tr>
                     </thead>
                     <tbody
                         hx-get="/api/events"
-                        hx-trigger="load, every 2s, change from:#level-filter"
-                        hx-include="#level-filter"
+                        hx-trigger="load, every 2s, change from:#level-filter, change from:#project-filter"
+                        hx-include="#level-filter, #search-input, #project-filter"
                         hx-ext="morph"
                         hx-swap="morph:innerHTML"
                         id="events-tbody"
@@ -204,6 +281,46 @@
             PocketSentry &mdash; open-source, self-hosted, ultra-lightweight error tracker.
         </p>
     </footer>
+
+    <!-- Project Creation Modal -->
+    <dialog id="project-modal" class="liquid-glass-modal text-gray-100 rounded-2xl p-6 w-full max-w-md">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold">Manage Projects</h3>
+            <button onclick="document.getElementById('project-modal').close()" class="text-gray-500 hover:text-white">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+        
+        <div class="mb-6 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+            <ul class="space-y-2">
+                {{range .Projects}}
+                <li class="flex items-center justify-between bg-gray-800/50 border border-gray-700/50 p-2.5 rounded-lg">
+                    <div class="flex flex-col">
+                        <span class="text-sm font-medium text-gray-200">{{.Name}}</span>
+                        <span class="text-xs text-gray-500">ID: {{.ID}}</span>
+                    </div>
+                    {{if ne .ID "1"}}
+                    <form action="/api/projects/delete/{{.ID}}" method="POST" onsubmit="return confirm('Delete this project and ALL its events forever?');">
+                        <button type="submit" class="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded-md transition-colors" title="Delete Project">
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </form>
+                    {{else}}
+                    <span class="text-xs text-gray-600 uppercase px-2">Default</span>
+                    {{end}}
+                </li>
+                {{end}}
+            </ul>
+        </div>
+
+        <div class="border-t border-gray-800 pt-5">
+            <h4 class="text-sm font-medium text-gray-400 mb-3">Create New Project</h4>
+            <form action="/api/projects" method="POST" class="flex gap-2">
+                <input type="text" name="name" placeholder="e.g. Frontend App" class="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block w-full p-2.5 outline-none" required>
+                <button type="submit" class="px-4 py-2 text-sm bg-brand-600 hover:bg-brand-500 rounded-lg text-white font-medium transition-colors whitespace-nowrap">Create</button>
+            </form>
+        </div>
+    </dialog>
 
     <script>
         document.addEventListener("DOMContentLoaded", function() {

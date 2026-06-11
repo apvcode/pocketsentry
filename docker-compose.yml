@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  pocketsentry:
+    build: .
+    container_name: pocketsentry
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    # You can pass additional flags here:
+    # command: ["--admin-user=admin", "--admin-pass=secret123", "--retention-days=15"]

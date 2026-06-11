@@ -52,10 +52,25 @@
     <td class="px-6 py-3.5 max-w-md">
         <p class="text-sm text-gray-300 truncate" title="{{.Message}}">{{.Message}}</p>
     </td>
+
+    <!-- Action -->
+    <td class="px-6 py-3.5 text-right">
+        <button 
+            hx-post="/api/events/resolve/{{.ID}}" 
+            hx-target="#event-{{.ID}}" 
+            hx-swap="delete" 
+            onclick="event.stopPropagation()"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 hover:text-emerald-300 ring-1 ring-emerald-500/20 transition-all">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+            </svg>
+            Resolve
+        </button>
+    </td>
 </tr>
 {{else}}
 <tr>
-    <td colspan="6" class="px-6 py-16 text-center">
+    <td colspan="7" class="px-6 py-16 text-center">
         <div class="flex flex-col items-center gap-3">
             <svg class="w-10 h-10 text-gray-700" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
