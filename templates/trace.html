@@ -1,0 +1,70 @@
+<div class="p-6">
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h2 class="text-xl font-bold text-white flex items-center gap-2">
+                <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                Trace View
+            </h2>
+            <p class="text-xs font-mono text-gray-500 mt-1 break-all">{{.Name}} <span class="ml-2 text-gray-600">ID: {{.ID}}</span></p>
+        </div>
+        <button onclick="document.getElementById('modal-overlay').classList.add('hidden')" class="text-gray-500 hover:text-white transition-colors">
+            <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
+    </div>
+
+    <div class="mb-4 flex items-center justify-between text-sm">
+        <span class="text-gray-400">Total Duration:</span>
+        <span class="text-white font-bold">{{printf "%.2f" .DurationMs}} ms</span>
+    </div>
+
+    <div class="bg-gray-900 rounded-xl border border-gray-700/50 p-4 overflow-hidden relative">
+        <!-- Ruler / Guide lines -->
+        <div class="absolute inset-0 border-l border-r border-gray-700/30 ml-48 mr-4 pointer-events-none"></div>
+        <div class="absolute inset-0 border-l border-gray-700/30 ml-[calc(24rem)] pointer-events-none border-dashed opacity-50"></div>
+        <div class="absolute inset-0 border-l border-gray-700/30 ml-[calc(50%)] pointer-events-none border-dashed opacity-50"></div>
+        <div class="absolute inset-0 border-l border-gray-700/30 ml-[calc(75%)] pointer-events-none border-dashed opacity-50"></div>
+
+        <div class="space-y-3 relative z-10 overflow-y-auto max-h-[60vh] pr-2 custom-scrollbar">
+            <!-- Root Transaction -->
+            <div class="flex items-center text-xs group relative">
+                <div class="w-48 flex-shrink-0 text-gray-400 truncate pr-4 font-mono" title="{{.Name}}">
+                    <span class="text-brand-400 mr-1">tx</span> {{.Name}}
+                </div>
+                <div class="flex-grow relative h-6 rounded bg-gray-800/50">
+                    <div class="absolute top-1 bottom-1 bg-brand-500 rounded text-[9px] text-white flex items-center px-1 overflow-hidden transition-all shadow-[0_0_10px_rgba(var(--color-brand-500),0.3)]" style="left: 0%; width: 100%;">
+                        <span class="truncate pl-1">{{printf "%.2f" .DurationMs}} ms</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Spans -->
+            {{range .Spans}}
+            <div class="flex items-center text-xs group relative hover:bg-gray-800/40 -mx-2 px-2 py-1 rounded transition-colors">
+                <div class="w-48 flex-shrink-0 text-gray-400 truncate pr-4 font-mono group-hover:text-gray-300 transition-colors" title="{{.Description}}">
+                    <span class="text-gray-500 mr-1">{{.Op}}</span> {{.Description}}
+                </div>
+                <div class="flex-grow relative h-6 rounded bg-gray-800/30 group-hover:bg-gray-800/60 transition-colors">
+                    <!-- Waterfall Bar -->
+                    <div class="absolute top-1 bottom-1 bg-blue-500/80 rounded min-w-[2px] text-[9px] text-white/90 flex items-center shadow-[0_0_10px_rgba(59,130,246,0.2)] group-hover:bg-blue-400 group-hover:shadow-[0_0_15px_rgba(59,130,246,0.4)] transition-all cursor-crosshair group-hover:z-10" 
+                         style="left: {{.LeftPct}}%; width: {{.WidthPct}}%;"
+                         title="Start: {{printf "%.2f" .LeftPct}}% | Duration: {{printf "%.2f" .DurationMs}} ms">
+                        {{if gt .WidthPct 10.0}}
+                        <span class="truncate px-1.5 opacity-0 group-hover:opacity-100 transition-opacity">{{printf "%.2f" .DurationMs}} ms</span>
+                        {{end}}
+                    </div>
+                    <!-- Tooltip bubble (shows when span is too small for internal text) -->
+                    {{if le .WidthPct 10.0}}
+                    <div class="absolute -top-6 left-[{{.LeftPct}}%] hidden group-hover:block bg-gray-800 border border-gray-700 px-2 py-0.5 rounded text-[10px] text-gray-200 z-20 shadow-xl whitespace-nowrap transform -translate-x-1/2">
+                        {{printf "%.2f" .DurationMs}} ms
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+            {{else}}
+            <div class="text-center py-8 text-gray-500">
+                <p>No spans recorded for this transaction.</p>
+            </div>
+            {{end}}
+        </div>
+    </div>
+</div>

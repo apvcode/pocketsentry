@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,7 +30,7 @@ import (
 )
 
 // currentVersion is the version of this binary, compared against GitHub releases.
-const currentVersion = "v1.1.0"
+const currentVersion = "v2.0.0"
 
 // templateFS embeds the templates directory into the binary so the final
 // executable is fully self-contained — no external files needed.
@@ -109,6 +111,14 @@ func initDB(path string) error {
 		name TEXT NOT NULL,
 		created_at DATETIME NOT NULL
 	);
+	
+	CREATE TABLE IF NOT EXISTS event_comments (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		event_id TEXT NOT NULL,
+		comment TEXT NOT NULL,
+		timestamp DATETIME NOT NULL,
+		author TEXT NOT NULL DEFAULT 'Admin'
+	);
 	`
 	if _, err := db.Exec(ddl); err != nil {
 		return fmt.Errorf("create table: %w", err)
@@ -119,9 +129,40 @@ func initDB(path string) error {
 		"ALTER TABLE events ADD COLUMN count INTEGER NOT NULL DEFAULT 1",
 		"ALTER TABLE events ADD COLUMN last_seen DATETIME NOT NULL DEFAULT ''",
 		"ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'unresolved'",
+		"ALTER TABLE projects ADD COLUMN tg_token TEXT DEFAULT ''",
+		"ALTER TABLE projects ADD COLUMN tg_chat_id TEXT DEFAULT ''",
+		"ALTER TABLE projects ADD COLUMN discord_webhook TEXT DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN resolved_in_release TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE events ADD COLUMN snoozed_until DATETIME NOT NULL DEFAULT ''",
 	}
 	for _, m := range migrations {
 		_, _ = db.Exec(m) // ignore "duplicate column" errors
+	}
+
+	// Performance Monitoring tables
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS transactions (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			start_timestamp DATETIME NOT NULL,
+			timestamp DATETIME NOT NULL,
+			duration_ms REAL NOT NULL,
+			raw_payload TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS spans (
+			id TEXT PRIMARY KEY,
+			transaction_id TEXT NOT NULL,
+			parent_span_id TEXT NOT NULL,
+			op TEXT NOT NULL,
+			description TEXT NOT NULL,
+			start_timestamp DATETIME NOT NULL,
+			timestamp DATETIME NOT NULL,
+			duration_ms REAL NOT NULL
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("create performance tables: %w", err)
 	}
 
 	// Insert default project if not exists
@@ -153,26 +194,44 @@ func saveEvent(ev SentryEvent, projectID, rawPayload string) error {
 	}
 	tsStr := ts.Format(time.RFC3339)
 
+	var oldStatus string
+	err := db.QueryRow("SELECT status FROM events WHERE project_id = ? AND message = ? AND level = ?", projectID, ev.Message, ev.Level).Scan(&oldStatus)
+	isNew := err == sql.ErrNoRows
+
 	var newCount int
-	err := db.QueryRow(
-		`INSERT INTO events (id, project_id, timestamp, level, platform, message, raw_payload, count, last_seen, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 'unresolved')
+	var newStatus string
+	err = db.QueryRow(
+		`INSERT INTO events (id, project_id, timestamp, level, platform, message, raw_payload, count, last_seen, status, resolved_in_release, snoozed_until)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 'unresolved', '', '')
 		 ON CONFLICT(project_id, message, level) DO UPDATE SET
-		   count     = count + 1,
+		   count     = events.count + 1,
 		   last_seen = ?,
-		   raw_payload = ?,
-		   status = 'unresolved'
-		 RETURNING count`,
+		   status = CASE 
+		     WHEN events.status = 'resolved' AND events.resolved_in_release = 'next' AND COALESCE(json_extract(EXCLUDED.raw_payload, '$.release'), '') = COALESCE(json_extract(events.raw_payload, '$.release'), '') THEN 'resolved'
+		     WHEN events.status = 'snoozed' AND events.snoozed_until > ? THEN 'snoozed'
+		     ELSE 'unresolved'
+		   END,
+		   resolved_in_release = CASE
+		     WHEN events.status = 'resolved' AND events.resolved_in_release = 'next' AND COALESCE(json_extract(EXCLUDED.raw_payload, '$.release'), '') != COALESCE(json_extract(events.raw_payload, '$.release'), '') THEN ''
+		     ELSE events.resolved_in_release
+		   END,
+		   snoozed_until = CASE
+		     WHEN events.status = 'snoozed' AND events.snoozed_until <= ? THEN ''
+		     ELSE events.snoozed_until
+		   END,
+		   raw_payload = EXCLUDED.raw_payload
+		 RETURNING count, status`,
 		ev.EventID, projectID, tsStr, ev.Level, ev.Platform, ev.Message, rawPayload, tsStr,
-		tsStr, rawPayload,
-	).Scan(&newCount)
+		tsStr, tsStr, tsStr,
+	).Scan(&newCount, &newStatus)
 	if err != nil {
 		return fmt.Errorf("upsert event: %w", err)
 	}
-	log.Printf("event project=%s level=%s msg=%q count=%d",
-		projectID, ev.Level, truncate(ev.Message, 80), newCount)
+	log.Printf("event project=%s level=%s msg=%q count=%d status=%s",
+		projectID, ev.Level, truncate(ev.Message, 80), newCount, newStatus)
 
-	if newCount == 1 {
+	shouldNotify := isNew || (oldStatus == "resolved" && newStatus == "unresolved") || (oldStatus == "snoozed" && newStatus == "unresolved")
+	if shouldNotify {
 		triggerWebhooks(ev, projectID)
 	}
 
@@ -193,10 +252,168 @@ type EventRow struct {
 	Message   string
 	Count     int
 	Status    string
+	Release   string
+}
+
+// SentryTransaction models a Performance Monitoring transaction payload.
+type SentryTransaction struct {
+	EventID        string       `json:"event_id"`
+	Transaction    string       `json:"transaction"`
+	StartTimestamp interface{}  `json:"start_timestamp"`
+	Timestamp      interface{}  `json:"timestamp"`
+	Spans          []SentrySpan `json:"spans"`
+}
+
+// SentrySpan models a child operation within a transaction.
+type SentrySpan struct {
+	SpanID         string      `json:"span_id"`
+	ParentSpanID   string      `json:"parent_span_id"`
+	Op             string      `json:"op"`
+	Description    string      `json:"description"`
+	StartTimestamp interface{} `json:"start_timestamp"`
+	Timestamp      interface{} `json:"timestamp"`
+}
+
+// parseSentryTimestamp converts float64 (unix seconds) or string (RFC3339) to time.Time
+func parseSentryTimestamp(v interface{}) time.Time {
+	if f, ok := v.(float64); ok {
+		sec := int64(f)
+		nsec := int64((f - float64(sec)) * 1e9)
+		return time.Unix(sec, nsec).UTC()
+	}
+	if s, ok := v.(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return t.UTC()
+		}
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			return t.UTC()
+		}
+		if t, err := time.Parse("2006-01-02T15:04:05", s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Now().UTC()
+}
+
+// saveTransaction inserts a transaction and its spans into the database.
+func saveTransaction(tx SentryTransaction, projectID, rawPayload string) error {
+	if tx.EventID == "" {
+		tx.EventID = generateUUID()
+	}
+	if tx.Transaction == "" {
+		tx.Transaction = "unknown_transaction"
+	}
+
+	startTs := parseSentryTimestamp(tx.StartTimestamp)
+	endTs := parseSentryTimestamp(tx.Timestamp)
+	durationMs := endTs.Sub(startTs).Seconds() * 1000.0
+
+	if durationMs < 0 {
+		durationMs = 0
+	}
+
+	_, err := db.Exec(
+		`INSERT OR IGNORE INTO transactions (id, project_id, name, start_timestamp, timestamp, duration_ms, raw_payload)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		tx.EventID, projectID, tx.Transaction, startTs.Format(time.RFC3339Nano), endTs.Format(time.RFC3339Nano), durationMs, rawPayload,
+	)
+	if err != nil {
+		return fmt.Errorf("insert transaction: %w", err)
+	}
+
+	// Insert spans
+	for _, span := range tx.Spans {
+		if span.SpanID == "" {
+			continue
+		}
+		spanStart := parseSentryTimestamp(span.StartTimestamp)
+		spanEnd := parseSentryTimestamp(span.Timestamp)
+		spanDur := spanEnd.Sub(spanStart).Seconds() * 1000.0
+		if spanDur < 0 {
+			spanDur = 0
+		}
+		_, _ = db.Exec(
+			`INSERT OR IGNORE INTO spans (id, transaction_id, parent_span_id, op, description, start_timestamp, timestamp, duration_ms)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			span.SpanID, tx.EventID, span.ParentSpanID, span.Op, span.Description, spanStart.Format(time.RFC3339Nano), spanEnd.Format(time.RFC3339Nano), spanDur,
+		)
+	}
+
+	return nil
+}
+
+// ---------- Transactions & Spans DB Queries ----------
+
+type TransactionGroupRow struct {
+	ExemplarID    string
+	ProjectID     string
+	Name          string
+	Count         int
+	AvgDurationMs float64
+	MaxDurationMs float64
+}
+
+func queryTransactionGroups() ([]TransactionGroupRow, error) {
+	q := `
+		SELECT t1.id, t1.project_id, t1.name, t2.cnt, t2.avg_ms, t2.max_ms
+		FROM transactions t1
+		JOIN (
+			SELECT name, COUNT(*) as cnt, AVG(duration_ms) as avg_ms, MAX(duration_ms) as max_ms
+			FROM transactions
+			GROUP BY name
+		) t2 ON t1.name = t2.name AND t1.duration_ms = t2.max_ms
+		GROUP BY t1.name
+		ORDER BY t2.max_ms DESC
+		LIMIT 50
+	`
+	rows, err := db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []TransactionGroupRow
+	for rows.Next() {
+		var g TransactionGroupRow
+		if err := rows.Scan(&g.ExemplarID, &g.ProjectID, &g.Name, &g.Count, &g.AvgDurationMs, &g.MaxDurationMs); err == nil {
+			groups = append(groups, g)
+		}
+	}
+	return groups, nil
+}
+
+type SpanRow struct {
+	ID             string
+	Op             string
+	Description    string
+	StartTimestamp time.Time
+	DurationMs     float64
+}
+
+func querySpans(transactionID string) ([]SpanRow, error) {
+	q := `SELECT id, op, description, start_timestamp, duration_ms FROM spans WHERE transaction_id = ? ORDER BY start_timestamp ASC`
+	rows, err := db.Query(q, transactionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var spans []SpanRow
+	for rows.Next() {
+		var s SpanRow
+		var ts string
+		if err := rows.Scan(&s.ID, &s.Op, &s.Description, &ts, &s.DurationMs); err == nil {
+			if parsed, e := time.Parse(time.RFC3339Nano, ts); e == nil {
+				s.StartTimestamp = parsed
+			}
+			spans = append(spans, s)
+		}
+	}
+	return spans, nil
 }
 
 // queryEvents returns the latest events for the dashboard.
-func queryEvents(limit int, levelFilter string, searchFilter string, projectFilter string) ([]EventRow, error) {
+func queryEvents(limit int, levelFilter string, searchFilter string, projectFilter string, envFilter string) ([]EventRow, error) {
 	var q string
 	var args []interface{}
 
@@ -209,7 +426,8 @@ func queryEvents(limit int, levelFilter string, searchFilter string, projectFilt
 			COALESCE(platform, ''),
 			COALESCE(message, ''),
 			COALESCE(count, 1),
-			COALESCE(status, 'unresolved')
+			COALESCE(status, 'unresolved'),
+			json_extract(raw_payload, '$.release')
 		FROM events
 		WHERE status = 'unresolved'
 	`
@@ -222,6 +440,11 @@ func queryEvents(limit int, levelFilter string, searchFilter string, projectFilt
 	if projectFilter != "" && projectFilter != "All" {
 		q += " AND project_id = ?"
 		args = append(args, projectFilter)
+	}
+
+	if envFilter != "" && envFilter != "All" {
+		q += " AND json_extract(raw_payload, '$.environment') = ?"
+		args = append(args, envFilter)
 	}
 
 	if searchFilter != "" {
@@ -241,9 +464,13 @@ func queryEvents(limit int, levelFilter string, searchFilter string, projectFilt
 	var result []EventRow
 	for rows.Next() {
 		var ev EventRow
-		if err := rows.Scan(&ev.ID, &ev.ProjectID, &ev.LastSeen, &ev.Level, &ev.Platform, &ev.Message, &ev.Count, &ev.Status); err != nil {
+		var release sql.NullString
+		if err := rows.Scan(&ev.ID, &ev.ProjectID, &ev.LastSeen, &ev.Level, &ev.Platform, &ev.Message, &ev.Count, &ev.Status, &release); err != nil {
 			log.Printf("scan row: %v", err)
 			continue
+		}
+		if release.Valid {
+			ev.Release = release.String
 		}
 		ev.LastSeen = formatTimestamp(ev.LastSeen)
 		result = append(result, ev)
@@ -296,6 +523,27 @@ func queryStats() ([]StatPoint, error) {
 		result = append(result, sp)
 	}
 	return result, nil
+}
+
+// queryEnvironments returns a list of unique environments present in the events.
+func queryEnvironments() ([]string, error) {
+	q := `SELECT DISTINCT json_extract(raw_payload, '$.environment') FROM events 
+	      WHERE json_extract(raw_payload, '$.environment') IS NOT NULL 
+	      AND json_extract(raw_payload, '$.environment') != ''`
+	rows, err := db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var envs []string
+	for rows.Next() {
+		var env string
+		if err := rows.Scan(&env); err == nil {
+			envs = append(envs, env)
+		}
+	}
+	return envs, nil
 }
 
 // formatTimestamp converts an RFC3339 timestamp into a shorter, more readable
@@ -360,6 +608,26 @@ type rawPayloadDetail struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"sdk,omitempty"`
+	Breadcrumbs json.RawMessage `json:"breadcrumbs,omitempty"`
+}
+
+// Breadcrumb represents a single breadcrumb entry.
+type Breadcrumb struct {
+	Timestamp string
+	Type      string
+	Category  string
+	Level     string
+	Message   string
+	Data      map[string]interface{}
+}
+
+// EventComment represents a user note on a specific event.
+type EventComment struct {
+	ID        int
+	EventID   string
+	Comment   string
+	Timestamp string
+	Author    string
 }
 
 // EventDetail is the struct passed to the detail.html template.
@@ -372,6 +640,9 @@ type EventDetail struct {
 	Platform    string
 	Message     string
 	Count       int
+	Status      string
+	ResolvedInRelease string
+	SnoozedUntil      string
 
 	ExcType     string
 	ExcValue    string
@@ -390,6 +661,10 @@ type EventDetail struct {
 	HasFrames   bool
 	Tags        map[string]string
 	HasTags     bool
+	Breadcrumbs []Breadcrumb
+	HasBreadcrumbs bool
+	Comments    []EventComment
+	HasLibraryFrames bool
 	RawJSON     string
 }
 
@@ -405,6 +680,9 @@ func queryEventByID(id string) (*EventDetail, error) {
 			COALESCE(platform, ''),
 			COALESCE(message, ''),
 			COALESCE(count, 1),
+			COALESCE(status, 'unresolved'),
+			COALESCE(resolved_in_release, ''),
+			COALESCE(snoozed_until, ''),
 			COALESCE(raw_payload, '{}')
 		FROM events WHERE id = ?
 	`
@@ -412,7 +690,8 @@ func queryEventByID(id string) (*EventDetail, error) {
 	var rawPayload string
 	err := db.QueryRow(q, id).Scan(
 		&ev.ID, &ev.ProjectID, &ev.Timestamp, &ev.LastSeen,
-		&ev.Level, &ev.Platform, &ev.Message, &ev.Count, &rawPayload,
+		&ev.Level, &ev.Platform, &ev.Message, &ev.Count,
+		&ev.Status, &ev.ResolvedInRelease, &ev.SnoozedUntil, &rawPayload,
 	)
 	if err != nil {
 		return nil, err
@@ -449,6 +728,54 @@ func queryEventByID(id string) (*EventDetail, error) {
 			ev.HasTags = true
 		}
 
+		// Extract Breadcrumbs
+		if len(raw.Breadcrumbs) > 0 {
+			var bcArray []struct {
+				Type      string                 `json:"type"`
+				Category  string                 `json:"category"`
+				Message   string                 `json:"message"`
+				Level     string                 `json:"level"`
+				Timestamp interface{}            `json:"timestamp"`
+				Data      map[string]interface{} `json:"data"`
+			}
+
+			// Try to parse as array first
+			if err := json.Unmarshal(raw.Breadcrumbs, &bcArray); err != nil {
+				// Fallback to object format { "values": [...] }
+				var bcObj struct {
+					Values []struct {
+						Type      string                 `json:"type"`
+						Category  string                 `json:"category"`
+						Message   string                 `json:"message"`
+						Level     string                 `json:"level"`
+						Timestamp interface{}            `json:"timestamp"`
+						Data      map[string]interface{} `json:"data"`
+					} `json:"values"`
+				}
+				if json.Unmarshal(raw.Breadcrumbs, &bcObj) == nil {
+					bcArray = bcObj.Values
+				}
+			}
+
+			if len(bcArray) > 0 {
+				ev.HasBreadcrumbs = true
+				for _, bc := range bcArray {
+					ts := parseSentryTimestamp(bc.Timestamp).Format("15:04:05")
+					if bc.Level == "" {
+						bc.Level = "info"
+					}
+					ev.Breadcrumbs = append(ev.Breadcrumbs, Breadcrumb{
+						Timestamp: ts,
+						Type:      bc.Type,
+						Category:  bc.Category,
+						Level:     bc.Level,
+						Message:   bc.Message,
+						Data:      bc.Data,
+					})
+				}
+			}
+		}
+
 		// Extract OS / Browser / Runtime from contexts.
 		if raw.Contexts != nil {
 			ev.OS = extractContextField(raw.Contexts, "os", "name", "version")
@@ -471,6 +798,27 @@ func queryEventByID(id string) (*EventDetail, error) {
 				// Apply Source Maps if available
 				ev.Frames = applySourceMaps(frames)
 				ev.HasFrames = true
+				for _, f := range ev.Frames {
+					if !f.InApp {
+						ev.HasLibraryFrames = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Fetch comments
+	cRows, err := db.Query("SELECT id, comment, timestamp, author FROM event_comments WHERE event_id = ? ORDER BY timestamp ASC", id)
+	if err == nil {
+		defer cRows.Close()
+		for cRows.Next() {
+			var c EventComment
+			var ts string
+			if err := cRows.Scan(&c.ID, &c.Comment, &ts, &c.Author); err == nil {
+				c.EventID = id
+				c.Timestamp = formatTimestamp(ts)
+				ev.Comments = append(ev.Comments, c)
 			}
 		}
 	}
@@ -627,11 +975,11 @@ func parseSentryEvent(data []byte) (SentryEvent, error) {
 
 // ---------- Envelope Parsing ----------
 
-// parseEnvelope handles the Sentry envelope format (NDJSON).
-func parseEnvelope(raw []byte) (SentryEvent, error) {
+// parseEnvelope handles the Sentry envelope format (NDJSON) and returns the event ID, item Type, and its raw JSON payload.
+func parseEnvelope(raw []byte) (string, string, []byte, error) {
 	lines := splitEnvelopeLines(raw)
 	if len(lines) == 0 {
-		return SentryEvent{}, fmt.Errorf("empty envelope")
+		return "", "", nil, fmt.Errorf("empty envelope")
 	}
 
 	var envelopeHeader struct {
@@ -650,14 +998,7 @@ func parseEnvelope(raw []byte) (SentryEvent, error) {
 		itemType := strings.ToLower(itemHeader.Type)
 		switch itemType {
 		case "event", "error", "transaction", "":
-			ev, err := parseSentryEvent(lines[i+1])
-			if err != nil {
-				continue
-			}
-			if ev.EventID == "" {
-				ev.EventID = envelopeHeader.EventID
-			}
-			return ev, nil
+			return envelopeHeader.EventID, itemType, lines[i+1], nil
 		default:
 			continue
 		}
@@ -665,16 +1006,16 @@ func parseEnvelope(raw []byte) (SentryEvent, error) {
 
 	// Fallback: brute-force — try every line as an event payload.
 	for _, line := range lines[1:] {
-		ev, err := parseSentryEvent(line)
-		if err == nil && (ev.Message != "" || ev.Exception != nil || ev.LogEntry != nil) {
-			if ev.EventID == "" {
-				ev.EventID = envelopeHeader.EventID
-			}
-			return ev, nil
+		var partial struct {
+			EventID string `json:"event_id"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(line, &partial); err == nil && partial.Message != "" {
+			return envelopeHeader.EventID, "event", line, nil
 		}
 	}
 
-	return SentryEvent{}, fmt.Errorf("no parseable event found in envelope (%d lines)", len(lines))
+	return "", "", nil, fmt.Errorf("no parseable event found in envelope (%d lines)", len(lines))
 }
 
 // splitEnvelopeLines splits envelope bytes by newlines, skipping empty lines.
@@ -784,20 +1125,38 @@ func triggerWebhooks(ev SentryEvent, projectID string) {
 	msg := fmt.Sprintf("🚨 **PocketSentry Alert**\n\n**Project:** %s\n**Level:** %s\n**Message:** %s\n**Time:** %s",
 		projectID, ev.Level, truncate(ev.Message, 150), time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
 
+	// Default webhook targets
+	targetDiscord := discordWebhookURL
+	targetTGToken := tgToken
+	targetTGChatID := tgChatID
+
+	// Check if this project has webhook overrides
+	var pTGToken, pTGChatID, pDiscordWebhook string
+	err := db.QueryRow("SELECT COALESCE(tg_token, ''), COALESCE(tg_chat_id, ''), COALESCE(discord_webhook, '') FROM projects WHERE id = ?", projectID).Scan(&pTGToken, &pTGChatID, &pDiscordWebhook)
+	if err == nil {
+		if pDiscordWebhook != "" {
+			targetDiscord = pDiscordWebhook
+		}
+		if pTGToken != "" && pTGChatID != "" {
+			targetTGToken = pTGToken
+			targetTGChatID = pTGChatID
+		}
+	}
+
 	// Discord
-	if discordWebhookURL != "" {
-		go sendDiscordWebhook(msg)
+	if targetDiscord != "" {
+		go sendDiscordWebhook(targetDiscord, msg)
 	}
 
 	// Telegram
-	if tgToken != "" && tgChatID != "" {
-		go sendTelegramWebhook(msg)
+	if targetTGToken != "" && targetTGChatID != "" {
+		go sendTelegramWebhook(targetTGToken, targetTGChatID, msg, ev.EventID)
 	}
 }
 
-func sendDiscordWebhook(content string) {
+func sendDiscordWebhook(url, content string) {
 	payload, _ := json.Marshal(map[string]string{"content": content})
-	resp, err := http.Post(discordWebhookURL, "application/json", bytes.NewReader(payload))
+	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("[discord] webhook error: %v", err)
 		return
@@ -808,13 +1167,29 @@ func sendDiscordWebhook(content string) {
 	}
 }
 
-func sendTelegramWebhook(content string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", tgToken)
-	payload, _ := json.Marshal(map[string]string{
-		"chat_id":    tgChatID,
+func sendTelegramWebhook(token, chatID, content, eventID string) {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
+	
+	payloadData := map[string]interface{}{
+		"chat_id":    chatID,
 		"text":       content,
 		"parse_mode": "Markdown",
-	})
+	}
+
+	if eventID != "" {
+		payloadData["reply_markup"] = map[string]interface{}{
+			"inline_keyboard": [][]map[string]interface{}{
+				{
+					{
+						"text":          "✅ Resolve",
+						"callback_data": "resolve_" + eventID,
+					},
+				},
+			},
+		}
+	}
+
+	payload, _ := json.Marshal(payloadData)
 	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("[telegram] webhook error: %v", err)
@@ -826,12 +1201,124 @@ func sendTelegramWebhook(content string) {
 	}
 }
 
+// ---------- Telegram Bot Polling ----------
+
+var (
+	activePollers = make(map[string]bool)
+	pollerMutex   sync.Mutex
+)
+
+func ensureTelegramPollers() {
+	for {
+		tokens := make(map[string]bool)
+		if tgToken != "" {
+			tokens[tgToken] = true
+		}
+
+		rows, err := db.Query("SELECT DISTINCT tg_token FROM projects WHERE tg_token IS NOT NULL AND tg_token != ''")
+		if err == nil {
+			for rows.Next() {
+				var t string
+				if err := rows.Scan(&t); err == nil {
+					tokens[t] = true
+				}
+			}
+			rows.Close()
+		}
+
+		pollerMutex.Lock()
+		for t := range tokens {
+			if !activePollers[t] {
+				activePollers[t] = true
+				go runTelegramPoller(t)
+			}
+		}
+		pollerMutex.Unlock()
+
+		time.Sleep(1 * time.Minute)
+	}
+}
+
+func runTelegramPoller(token string) {
+	offset := 0
+	log.Printf("[telegram] started polling for bot token: %s...", token[:5])
+
+	for {
+		url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30", token, offset)
+		resp, err := http.Get(url)
+		if err != nil {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		var updateRes struct {
+			Ok     bool `json:"ok"`
+			Result []struct {
+				UpdateID      int `json:"update_id"`
+				CallbackQuery struct {
+					ID      string `json:"id"`
+					Message struct {
+						MessageID int `json:"message_id"`
+						Chat      struct {
+							ID int64 `json:"id"`
+						} `json:"chat"`
+						Text string `json:"text"`
+					} `json:"message"`
+					Data string `json:"data"`
+					From struct {
+						FirstName string `json:"first_name"`
+					} `json:"from"`
+				} `json:"callback_query"`
+			} `json:"result"`
+		}
+
+		err = json.NewDecoder(resp.Body).Decode(&updateRes)
+		resp.Body.Close()
+		if err != nil || !updateRes.Ok {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		for _, u := range updateRes.Result {
+			if u.UpdateID >= offset {
+				offset = u.UpdateID + 1
+			}
+
+			cb := u.CallbackQuery
+			if strings.HasPrefix(cb.Data, "resolve_") {
+				eventID := strings.TrimPrefix(cb.Data, "resolve_")
+				
+				// Resolve event in DB
+				_, _ = db.Exec("UPDATE events SET status = 'resolved' WHERE id = ?", eventID)
+
+				// Answer callback (removes loading state from button)
+				ansURL := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery?callback_query_id=%s&text=Event%%20Resolved!", token, cb.ID)
+				_, _ = http.Get(ansURL)
+
+				// Edit message to remove button and append resolved info
+				newText := cb.Message.Text + fmt.Sprintf("\n\n✅ *Resolved by %s*", cb.From.FirstName)
+				editURL := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", token)
+				
+				payload, _ := json.Marshal(map[string]interface{}{
+					"chat_id":    cb.Message.Chat.ID,
+					"message_id": cb.Message.MessageID,
+					"text":       newText,
+				})
+				http.Post(editURL, "application/json", bytes.NewReader(payload))
+			}
+		}
+	}
+}
+
 // ---------- Handlers ----------
 
 // Project represents a user project.
 type Project struct {
-	ID   string
-	Name string
+	ID             string
+	Name           string
+	TGToken        string
+	TGChatID       string
+	DiscordWebhook string
 }
 
 // IndexData is passed to the index.html template.
@@ -840,6 +1327,7 @@ type IndexData struct {
 	Webhooks        string
 	Retention       string
 	Projects        []Project
+	Environments    []string
 }
 
 // indexHandler serves the main dashboard page.
@@ -867,22 +1355,25 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var projects []Project
-	rows, err := db.Query("SELECT id, name FROM projects ORDER BY created_at ASC")
+	rows, err := db.Query("SELECT id, name, COALESCE(tg_token, ''), COALESCE(tg_chat_id, ''), COALESCE(discord_webhook, '') FROM projects ORDER BY id ASC")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var p Project
-			if err := rows.Scan(&p.ID, &p.Name); err == nil {
+			if err := rows.Scan(&p.ID, &p.Name, &p.TGToken, &p.TGChatID, &p.DiscordWebhook); err == nil {
 				projects = append(projects, p)
 			}
 		}
 	}
+
+	envs, _ := queryEnvironments()
 
 	data := IndexData{
 		UnresolvedCount: count,
 		Webhooks:        webhooks,
 		Retention:       retention,
 		Projects:        projects,
+		Environments:    envs,
 	}
 
 	if err := tmplIndex.Execute(w, data); err != nil {
@@ -895,7 +1386,9 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	level := r.URL.Query().Get("level")
 	search := r.URL.Query().Get("search")
 	project := r.URL.Query().Get("project")
-	events, err := queryEvents(50, level, search, project)
+	env := r.URL.Query().Get("environment")
+	
+	events, err := queryEvents(50, level, search, project, env)
 	if err != nil {
 		log.Printf("query events: %v", err)
 		events = []EventRow{}
@@ -905,6 +1398,41 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	if err := tmplRows.Execute(w, events); err != nil {
 		log.Printf("rows template error: %v", err)
 	}
+}
+
+// exportCSVHandler generates a CSV file with currently filtered events.
+func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
+	level := r.URL.Query().Get("level")
+	search := r.URL.Query().Get("search")
+	project := r.URL.Query().Get("project")
+	env := r.URL.Query().Get("environment")
+
+	events, err := queryEvents(10000, level, search, project, env)
+	if err != nil {
+		log.Printf("csv export error: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", `attachment; filename="pocketsentry_events.csv"`)
+
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"ID", "ProjectID", "LastSeen", "Level", "Platform", "Message", "Occurrences", "Status"})
+
+	for _, ev := range events {
+		_ = writer.Write([]string{
+			ev.ID,
+			ev.ProjectID,
+			ev.LastSeen,
+			ev.Level,
+			ev.Platform,
+			ev.Message,
+			fmt.Sprintf("%d", ev.Count),
+			ev.Status,
+		})
+	}
+	writer.Flush()
 }
 
 // storeHandler handles the legacy /api/{project_id}/store/ endpoint.
@@ -939,18 +1467,117 @@ func envelopeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ev, err := parseEnvelope(body)
+	eventID, itemType, rawJSON, err := parseEnvelope(body)
 	if err != nil {
 		log.Printf("[envelope] parse error: %v", err)
 		respondOK(w)
 		return
 	}
 
-	if err := saveEvent(ev, projectID, string(body)); err != nil {
-		log.Printf("[envelope] save error: %v", err)
+	if itemType == "transaction" {
+		var tx SentryTransaction
+		if err := json.Unmarshal(rawJSON, &tx); err == nil {
+			if tx.EventID == "" {
+				tx.EventID = eventID
+			}
+			if err := saveTransaction(tx, projectID, string(rawJSON)); err != nil {
+				log.Printf("[envelope] save transaction error: %v", err)
+			}
+		}
+	} else {
+		ev, err := parseSentryEvent(rawJSON)
+		if err == nil {
+			if ev.EventID == "" {
+				ev.EventID = eventID
+			}
+			if err := saveEvent(ev, projectID, string(rawJSON)); err != nil {
+				log.Printf("[envelope] save event error: %v", err)
+			}
+		}
 	}
 
-	respondWithID(w, ev.EventID)
+	respondWithID(w, eventID)
+}
+
+// performanceHandler renders the performance tab content.
+func performanceHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	groups, err := queryTransactionGroups()
+	if err != nil {
+		log.Printf("query transaction groups error: %v", err)
+	}
+
+	tmpl, err := template.ParseFiles(filepath.Join("templates", "performance.html"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = tmpl.Execute(w, map[string]interface{}{
+		"Groups": groups,
+	})
+}
+
+// traceHandler renders the waterfall trace for a specific transaction ID.
+func traceHandler(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/performance/trace/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	var txName string
+	var txStartStr string
+	var txDur float64
+	err := db.QueryRow("SELECT name, start_timestamp, duration_ms FROM transactions WHERE id = ?", id).Scan(&txName, &txStartStr, &txDur)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	txStart, _ := time.Parse(time.RFC3339Nano, txStartStr)
+	rawSpans, _ := querySpans(id)
+
+	type TraceSpan struct {
+		Op          string
+		Description string
+		DurationMs  float64
+		LeftPct     float64
+		WidthPct    float64
+	}
+
+	var traceSpans []TraceSpan
+	for _, s := range rawSpans {
+		offsetMs := s.StartTimestamp.Sub(txStart).Seconds() * 1000.0
+		if offsetMs < 0 { offsetMs = 0 }
+		
+		leftPct := (offsetMs / txDur) * 100.0
+		if leftPct > 100 { leftPct = 100 }
+		
+		widthPct := (s.DurationMs / txDur) * 100.0
+		if leftPct + widthPct > 100 { widthPct = 100 - leftPct }
+		if widthPct < 0.5 { widthPct = 0.5 } // Ensure it's at least visible
+
+		traceSpans = append(traceSpans, TraceSpan{
+			Op:          s.Op,
+			Description: s.Description,
+			DurationMs:  s.DurationMs,
+			LeftPct:     leftPct,
+			WidthPct:    widthPct,
+		})
+	}
+
+	tmpl, err := template.ParseFiles(filepath.Join("templates", "trace.html"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	
+	_ = tmpl.Execute(w, map[string]interface{}{
+		"ID":         id,
+		"Name":       txName,
+		"DurationMs": txDur,
+		"Spans":      traceSpans,
+	})
 }
 
 // extractProjectID pulls the project ID from a URL path.
@@ -986,6 +1613,42 @@ func eventDetailHandler(w http.ResponseWriter, r *http.Request) {
 	if err := tmplDetail.Execute(w, ev); err != nil {
 		log.Printf("detail template error: %v", err)
 	}
+}
+
+// postCommentHandler handles HTMX form submissions for new comments.
+func postCommentHandler(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/events/")
+	id = strings.TrimSuffix(id, "/comments")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	
+	comment := strings.TrimSpace(r.FormValue("comment"))
+	if comment == "" {
+		http.Error(w, "empty comment", http.StatusBadRequest)
+		return
+	}
+
+	author := "Admin" // We could parse from session later
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	_, err := db.Exec("INSERT INTO event_comments (event_id, comment, timestamp, author) VALUES (?, ?, ?, ?)", id, comment, ts, author)
+	if err != nil {
+		log.Printf("insert comment: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Just trigger a page reload via HTMX header to show the new comment,
+	// or return the new comment snippet. Since detail.html doesn't have a partial for just comments yet, HX-Refresh is easiest.
+	w.Header().Set("HX-Refresh", "true")
+	w.WriteHeader(http.StatusOK)
 }
 
 // statsHandler returns JSON for the ApexCharts graph.
@@ -1044,13 +1707,57 @@ func resolveHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
-	_, err := db.Exec("UPDATE events SET status = 'resolved' WHERE id = ?", id)
+	
+	snoozeStr := r.URL.Query().Get("snooze")
+	if snoozeStr != "" {
+		dur, err := time.ParseDuration(snoozeStr)
+		if err != nil {
+			http.Error(w, "Invalid duration", http.StatusBadRequest)
+			return
+		}
+		until := time.Now().UTC().Add(dur).Format(time.RFC3339)
+		_, err = db.Exec("UPDATE events SET status = 'snoozed', snoozed_until = ? WHERE id = ?", until, id)
+		if err != nil {
+			log.Printf("snooze error: %v", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		
+		if strings.Contains(r.Header.Get("HX-Current-Url"), "/events/") {
+			w.Header().Set("Content-Type", "text/html")
+			badge := `<div class="px-3 py-1.5 bg-amber-500/10 text-amber-400 text-xs font-semibold rounded-lg border border-amber-500/20 shadow-sm flex items-center gap-1.5"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0M3.124 7.5A8.969 8.969 0 015.292 3m13.416 0a8.969 8.969 0 012.168 4.5" /></svg> Snoozed (` + snoozeStr + `)</div>`
+			w.Write([]byte(badge))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	nextStr := r.URL.Query().Get("next")
+	resolvedIn := ""
+	if nextStr == "true" {
+		resolvedIn = "next"
+	}
+	
+	_, err := db.Exec("UPDATE events SET status = 'resolved', resolved_in_release = ? WHERE id = ?", resolvedIn, id)
 	if err != nil {
 		log.Printf("resolve error: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	// Return empty 200 OK
+	
+	if strings.Contains(r.Header.Get("HX-Current-Url"), "/events/") {
+		w.Header().Set("Content-Type", "text/html")
+		var badge string
+		if resolvedIn == "next" {
+			badge = `<div class="px-3 py-1.5 bg-brand-500/10 text-brand-400 text-xs font-semibold rounded-lg border border-brand-500/20 shadow-sm flex items-center gap-1.5"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg> Resolved in Next Release</div>`
+		} else {
+			badge = `<div class="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 text-xs font-semibold rounded-lg border border-emerald-500/20 shadow-sm flex items-center gap-1.5"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg> Resolved</div>`
+		}
+		w.Write([]byte(badge))
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -1113,6 +1820,37 @@ func deleteProjectHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// updateProjectSettingsHandler updates the webhook configurations for a specific project.
+func updateProjectSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/projects/update/")
+	if id == "" {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	tgToken := r.FormValue("tg_token")
+	tgChatID := r.FormValue("tg_chat_id")
+	discordWebhook := r.FormValue("discord_webhook")
+
+	_, err := db.Exec(`
+		UPDATE projects 
+		SET tg_token = ?, tg_chat_id = ?, discord_webhook = ?
+		WHERE id = ?`,
+		tgToken, tgChatID, discordWebhook, id,
+	)
+	if err != nil {
+		log.Printf("update project settings error: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 // ---------- Router ----------
 
 func newRouter() http.Handler {
@@ -1141,6 +1879,13 @@ func newRouter() http.Handler {
 		}
 		http.NotFound(w, r)
 	})
+	protected.HandleFunc("/api/events/export", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			exportCSVHandler(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
 	protected.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			statsHandler(w, r)
@@ -1157,8 +1902,18 @@ func newRouter() http.Handler {
 	mux.Handle("/api/events", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		protected.ServeHTTP(w, r)
 	})))
+	mux.Handle("/api/events/export", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protected.ServeHTTP(w, r)
+	})))
 	mux.Handle("/api/events/resolve/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resolveHandler(w, r)
+	})))
+	mux.Handle("/api/events/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/comments") && r.Method == http.MethodPost {
+			postCommentHandler(w, r)
+			return
+		}
+		http.NotFound(w, r)
 	})))
 
 	mux.Handle("/api/projects", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1167,6 +1922,18 @@ func newRouter() http.Handler {
 
 	mux.Handle("/api/projects/delete/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deleteProjectHandler(w, r)
+	})))
+
+	mux.Handle("/api/projects/update/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		updateProjectSettingsHandler(w, r)
+	})))
+
+	mux.Handle("/api/performance", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		performanceHandler(w, r)
+	})))
+
+	mux.Handle("/api/performance/trace/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceHandler(w, r)
 	})))
 
 	mux.Handle("/api/stats", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1347,7 +2114,7 @@ const banner = `
 func printBanner(port, dbPath, user string, retDays int) {
 	fmt.Print(banner)
 	fmt.Println("  ──────────────────────────────────────────────────")
-	fmt.Printf("  🛡️  Version     : 1.1.0\n")
+	fmt.Printf("  🛡️  Version     : 2.0.0\n")
 	fmt.Printf("  🌐 Dashboard   : http://localhost:%s\n", port)
 	fmt.Printf("  📦 Database    : %s\n", dbPath)
 	fmt.Printf("  🔗 DSN         : http://public@localhost:%s/1\n", port)
@@ -1450,6 +2217,9 @@ func main() {
 	if *retentionDays > 0 {
 		go runRetentionCleanup(cleanupCtx, *retentionDays)
 	}
+
+	// Start Telegram bot pollers.
+	go ensureTelegramPollers()
 
 	// Start server in a goroutine.
 	go func() {

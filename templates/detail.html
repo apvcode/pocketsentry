@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.ExcType}}{{if .ExcType}}: {{end}}{{.Message}} — PocketSentry</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script>
         tailwind.config = {
             theme: {
@@ -14,6 +15,7 @@
             }
         }
     </script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <style>
         body { background: #030712; }
         .glass-card {
@@ -28,6 +30,23 @@
         .code-line { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; font-size: 13px; }
         .code-line-error { background: rgba(239, 68, 68, 0.12); border-left: 3px solid #ef4444; }
         .code-line-context { border-left: 3px solid transparent; }
+        
+        /* Prism Overrides */
+        code[class*="language-"], pre[class*="language-"] {
+            background: transparent !important;
+            text-shadow: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            box-shadow: none !important;
+        }
+        .token.comment, .token.prolog, .token.doctype, .token.cdata { color: #8b949e !important; }
+        .token.punctuation { color: #8b949e !important; }
+        .token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol, .token.deleted { color: #79c0ff !important; }
+        .token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted { color: #a5d6ff !important; }
+        .token.operator, .token.entity, .token.url, .language-css .token.string, .style .token.string { color: #d2a8ff !important; }
+        .token.atrule, .token.attr-value, .token.keyword { color: #ff7b72 !important; }
+        .token.function, .token.class-name { color: #d2a8ff !important; }
+    </style>
     </style>
 </head>
 <body class="text-gray-100 min-h-screen">
@@ -46,8 +65,38 @@
         </a>
 
         <!-- Header -->
-        <div class="glass-card rounded-2xl p-6 mb-6">
-            <div class="flex flex-wrap items-start gap-3 mb-4">
+        <div class="glass-card rounded-2xl p-6 mb-6 relative">
+            <div id="resolve-buttons-{{.ID}}" class="absolute top-6 right-6 flex items-center gap-2">
+                {{if eq .Status "resolved"}}
+                    {{if eq .ResolvedInRelease "next"}}
+                    <div class="px-3 py-1.5 bg-brand-500/10 text-brand-400 text-xs font-semibold rounded-lg border border-brand-500/20 shadow-sm flex items-center gap-1.5"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg> Resolved in Next Release</div>
+                    {{else}}
+                    <div class="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 text-xs font-semibold rounded-lg border border-emerald-500/20 shadow-sm flex items-center gap-1.5"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg> Resolved</div>
+                    {{end}}
+                {{else if eq .Status "snoozed"}}
+                    <div class="px-3 py-1.5 bg-amber-500/10 text-amber-400 text-xs font-semibold rounded-lg border border-amber-500/20 shadow-sm flex items-center gap-1.5"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0M3.124 7.5A8.969 8.969 0 015.292 3m13.416 0a8.969 8.969 0 012.168 4.5" /></svg> Snoozed</div>
+                {{else}}
+                <div class="relative group">
+                    <button class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-semibold rounded-lg border border-gray-700 transition-colors shadow-sm flex items-center gap-1.5">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" /></svg> Snooze
+                    </button>
+                    <!-- Dropdown for Snooze -->
+                    <div class="absolute right-0 mt-2 w-32 bg-gray-800 border border-gray-700 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 overflow-hidden">
+                        <button hx-post="/api/events/resolve/{{.ID}}?snooze=1h" hx-target="#resolve-buttons-{{.ID}}" hx-swap="innerHTML" class="w-full text-left px-4 py-2 text-xs text-gray-300 hover:bg-gray-700 hover:text-white transition-colors">1 Hour</button>
+                        <button hx-post="/api/events/resolve/{{.ID}}?snooze=24h" hx-target="#resolve-buttons-{{.ID}}" hx-swap="innerHTML" class="w-full text-left px-4 py-2 text-xs text-gray-300 hover:bg-gray-700 hover:text-white transition-colors">24 Hours</button>
+                        <button hx-post="/api/events/resolve/{{.ID}}?snooze=168h" hx-target="#resolve-buttons-{{.ID}}" hx-swap="innerHTML" class="w-full text-left px-4 py-2 text-xs text-gray-300 hover:bg-gray-700 hover:text-white transition-colors">1 Week</button>
+                    </div>
+                </div>
+                <button hx-post="/api/events/resolve/{{.ID}}" hx-target="#resolve-buttons-{{.ID}}" hx-swap="innerHTML" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-semibold rounded-lg border border-gray-700 transition-colors shadow-sm">
+                    Resolve
+                </button>
+                <button hx-post="/api/events/resolve/{{.ID}}?next=true" hx-target="#resolve-buttons-{{.ID}}" hx-swap="innerHTML" class="px-3 py-1.5 bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 text-xs font-semibold rounded-lg border border-brand-500/20 transition-colors shadow-sm">
+                    Resolve in Next Release
+                </button>
+                {{end}}
+            </div>
+            
+            <div class="flex flex-wrap items-start gap-3 mb-4 pr-64">
                 <!-- Level badge -->
                 {{if or (eq .Level "fatal") (eq .Level "error")}}
                 <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-red-500/15 text-red-400 ring-1 ring-red-500/20">
@@ -155,7 +204,7 @@
         <!-- Stack Trace -->
         {{if .HasFrames}}
         <div class="glass-card rounded-2xl overflow-hidden mb-6">
-            <div class="px-6 py-4 border-b border-gray-800/60">
+            <div class="px-6 py-4 border-b border-gray-800/60 flex justify-between items-center flex-wrap gap-4">
                 <h2 class="text-sm font-semibold text-gray-200 flex items-center gap-2">
                     <svg class="w-4 h-4 text-red-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
@@ -163,20 +212,25 @@
                     Stack Trace
                     <span class="text-xs text-gray-500 font-normal">({{len .Frames}} frames)</span>
                 </h2>
+                {{if .HasLibraryFrames}}
+                <button onclick="toggleLibraryFrames()" id="btn-toggle-frames" class="text-xs px-3 py-1.5 bg-gray-800 text-gray-300 hover:text-white border border-gray-700 hover:border-gray-600 rounded-lg transition-colors">
+                    Show Full Stack Trace
+                </button>
+                {{end}}
             </div>
 
             <div class="divide-y divide-gray-800/40">
                 {{range .Frames}}
-                <div class="group">
+                <div class="group frame-row {{if not .InApp}}library-frame hidden bg-gray-900/30{{end}}">
                     <!-- Frame header -->
                     <div class="px-6 py-3 flex items-center justify-between">
                         <div class="flex items-center gap-3 min-w-0">
                             {{if .InApp}}
-                            <span class="flex-shrink-0 w-2 h-2 rounded-full bg-brand-400" title="In-app frame"></span>
+                            <span class="flex-shrink-0 w-2 h-2 rounded-full bg-brand-400 shadow-[0_0_8px_rgba(167,139,250,0.5)]" title="In-app frame"></span>
                             {{else}}
                             <span class="flex-shrink-0 w-2 h-2 rounded-full bg-gray-600" title="Library frame"></span>
                             {{end}}
-                            <span class="text-sm text-gray-300 font-medium truncate">{{if .Function}}{{.Function}}{{else}}(anonymous){{end}}</span>
+                            <span class="text-sm text-gray-300 font-medium truncate {{if not .InApp}}text-gray-500{{end}}">{{if .Function}}{{.Function}}{{else}}(anonymous){{end}}</span>
                         </div>
                         <span class="text-xs text-gray-500 font-mono flex-shrink-0 ml-4">{{.Filename}}{{if .Lineno}}:{{.Lineno}}{{end}}</span>
                     </div>
@@ -187,19 +241,19 @@
                         {{range $i, $line := .PreContext}}
                         <div class="code-line code-line-context flex">
                             <span class="w-12 flex-shrink-0 text-right pr-3 text-gray-600 select-none py-0.5">&nbsp;</span>
-                            <span class="text-gray-500 py-0.5 pr-4">{{$line}}</span>
+                            <span class="text-gray-400 py-0.5 pr-4 flex-grow"><code class="language-js">{{$line}}</code></span>
                         </div>
                         {{end}}
                         {{if .ContextLine}}
                         <div class="code-line code-line-error flex">
                             <span class="w-12 flex-shrink-0 text-right pr-3 text-red-400/70 font-bold select-none py-0.5">{{.Lineno}}</span>
-                            <span class="text-gray-200 py-0.5 pr-4">{{.ContextLine}}</span>
+                            <span class="text-gray-100 py-0.5 pr-4 flex-grow font-semibold"><code class="language-js">{{.ContextLine}}</code></span>
                         </div>
                         {{end}}
                         {{range $i, $line := .PostContext}}
                         <div class="code-line code-line-context flex">
                             <span class="w-12 flex-shrink-0 text-right pr-3 text-gray-600 select-none py-0.5">&nbsp;</span>
-                            <span class="text-gray-500 py-0.5 pr-4">{{$line}}</span>
+                            <span class="text-gray-400 py-0.5 pr-4 flex-grow"><code class="language-js">{{$line}}</code></span>
                         </div>
                         {{end}}
                     </div>
@@ -233,6 +287,81 @@
         </div>
         {{end}}
 
+        <!-- Breadcrumbs -->
+        {{if .HasBreadcrumbs}}
+        <div class="glass-card rounded-2xl overflow-hidden mb-6">
+            <div class="px-6 py-4 border-b border-gray-800/60">
+                <h2 class="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                    <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    Breadcrumbs
+                </h2>
+            </div>
+            <div class="p-6">
+                <div class="relative border-l border-gray-700/50 ml-3 space-y-6">
+                    {{range .Breadcrumbs}}
+                    <div class="relative pl-6">
+                        <div class="absolute -left-[5px] top-1.5 w-2.5 h-2.5 rounded-full {{if eq .Level `error`}}bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.5)]{{else if eq .Level `warning`}}bg-orange-400 shadow-[0_0_8px_rgba(251,146,60,0.5)]{{else}}bg-gray-500{{end}}"></div>
+                        <div class="bg-gray-800/30 p-3 rounded-lg border border-gray-700/30 group hover:border-gray-600/50 transition-colors">
+                            <div class="flex items-start justify-between mb-1.5">
+                                <div class="flex items-center gap-2">
+                                    <span class="text-[10px] font-semibold text-gray-300 uppercase tracking-wider">{{.Category}}</span>
+                                    {{if .Type}}<span class="text-[10px] bg-gray-700/50 text-gray-400 px-1.5 py-0.5 rounded">{{.Type}}</span>{{end}}
+                                </div>
+                                <span class="text-xs font-mono text-gray-500">{{.Timestamp}}</span>
+                            </div>
+                            <p class="text-sm text-gray-400 font-mono break-all">{{.Message}}</p>
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+        {{end}}
+
+        <!-- Comments -->
+        <div class="glass-card rounded-2xl overflow-hidden mb-6">
+            <div class="px-6 py-4 border-b border-gray-800/60">
+                <h2 class="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                    <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
+                    </svg>
+                    Notes
+                </h2>
+            </div>
+            <div class="p-6">
+                {{if .Comments}}
+                <div class="space-y-4 mb-6">
+                    {{range .Comments}}
+                    <div class="bg-gray-800/40 p-4 rounded-xl border border-gray-700/30 group">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs font-semibold text-gray-300 flex items-center gap-2">
+                                <span class="w-5 h-5 rounded-full bg-brand-500/20 text-brand-400 flex items-center justify-center font-bold text-[10px]">{{printf "%.1s" .Author}}</span>
+                                {{.Author}}
+                            </span>
+                            <span class="text-xs font-mono text-gray-500">{{.Timestamp}}</span>
+                        </div>
+                        <p class="text-sm text-gray-400 whitespace-pre-wrap pl-7">{{.Comment}}</p>
+                    </div>
+                    {{end}}
+                </div>
+                {{end}}
+
+                <form hx-post="/api/events/{{.ID}}/comments" class="flex flex-col gap-3 relative pl-7">
+                    <div class="absolute left-0 top-2 w-5 h-5 rounded-full bg-gray-700/50 flex items-center justify-center">
+                        <svg class="w-3 h-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                    </div>
+                    <textarea name="comment" rows="2" placeholder="Add a note (e.g., 'Fixed in PR #123')..." required class="w-full bg-gray-900/50 border border-gray-700 rounded-lg p-3 text-sm text-gray-300 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 placeholder-gray-600 transition-colors"></textarea>
+                    <div class="flex justify-end">
+                        <button type="submit" class="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-brand-500/20">
+                            Save Note
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
         <!-- Raw JSON -->
         <details class="glass-card rounded-2xl overflow-hidden mb-6 group">
             <summary class="px-6 py-4 cursor-pointer flex items-center justify-between hover:bg-gray-800/30 transition-colors">
@@ -258,5 +387,24 @@
         PocketSentry — open-source, self-hosted, ultra-lightweight error tracker
     </footer>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    
+    <script>
+        function toggleLibraryFrames() {
+            const isHidden = document.querySelector('.library-frame.hidden') !== null;
+            document.querySelectorAll('.library-frame').forEach(el => {
+                if (isHidden) {
+                    el.classList.remove('hidden');
+                } else {
+                    el.classList.add('hidden');
+                }
+            });
+            document.getElementById('btn-toggle-frames').innerText = isHidden ? "Hide Library Frames" : "Show Full Stack Trace";
+        }
+    </script>
 </body>
 </html>

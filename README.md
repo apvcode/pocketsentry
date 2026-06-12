@@ -75,8 +75,16 @@ You just wanted to catch a `TypeError` in your side project. Not deploy a distri
 - 🏥 **Health Check** — `/health` endpoint for uptime monitoring and orchestration
 - 🔔 **Webhooks** — Instant error alerts in Telegram and Discord (only for new unique errors)
 - 🛠️ **Error Lifecycle** — Resolve errors directly from the dashboard (automatically reopens if the error reoccurs)
-- 📂 **Project Management** — Create isolated workspaces for your different apps and fetch dynamic DSNs.
-- 🗺️ **Source Maps** — Automatic demangling of minified JavaScript stacktraces via local `.map` files.
+- 📂 **Project Management** — Create isolated workspaces for your different apps and fetch dynamic DSNs
+- 🗺️ **Source Maps** — Automatic demangling of minified JavaScript stacktraces via local `.map` files
+- ⚡ **Performance Monitoring** — Track slow transactions with waterfall visualization of nested spans
+- 👁️ **Interactive Stacktraces** — Prism.js syntax highlighting and toggle to collapse/expand third-party library frames
+- 🍞 **Breadcrumbs Timeline** — Visual history of user actions (UI clicks, HTTP requests, console logs) preceding an error
+- 🏷️ **Release Tracking** — Track errors associated with specific app versions (releases) with badges
+- 🤖 **Interactive Telegram Bot** — Resolve errors directly from the Telegram chat with action buttons
+- ⚙️ **Notification Routing** — Project-specific webhook target overrides (Discord/Telegram) for smart alerting
+- 💬 **Local Issue Notes** — Add team comments and debugging notes directly to errors in the dashboard
+- 🚀 **Smart Resolving** — Mark errors as "Resolved in Next Release" and let PocketSentry automatically detect regressions
 
 ### 🚀 Quick Start
 
@@ -190,7 +198,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 1.1.0
+  🛡️  Version     : 2.0.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1
@@ -216,12 +224,24 @@ go build -o pocketsentry .
 
 ### 🗺️ Roadmap
 
-- [x] Event detail page with full stack trace
+<details>
+<summary><strong>✅ Completed Features</strong></summary>
+
+- [x] Event detail page with full stacktrace
 - [x] Retention policies (auto-delete old events)
 - [x] Authentication
-- [ ] Project management (create/delete projects)
-- [ ] Source maps support
-- [ ] Docker image
+- [x] Project management (create/delete projects)
+- [x] Source maps support
+- [x] Docker image
+- [x] Data Export (CSV)
+- [x] Project-specific notification routing (different chats for different projects)
+- [x] Interactive Telegram bot (resolving bugs directly from the chat)
+- [x] Transactions support (Performance Monitoring)
+- [x] Local Issue Notes (comments directly on errors)
+- [x] Smart Resolving ("Resolved in Next Release" regression tracking)
+- [x] Snooze Alert (Mute error notifications for a specific time)
+
+</details>
 
 ### 📄 License
 
@@ -280,6 +300,14 @@ go build -o pocketsentry .
 - 🛠️ **Жизненный цикл ошибок** — Возможность отмечать ошибки как «решенные» прямо из дашборда (автоматически переоткрываются, если баг повторится)
 - 📂 **Управление проектами** — Создание отдельных воркспейсов для разных приложений со своими DSN.
 - 🗺️ **Source Maps** — Автоматическая расшифровка минифицированных JS-ошибок (просто положите `.map` файлы в папку `sourcemaps/`).
+- ⚡ **Мониторинг производительности** — Отслеживание медленных транзакций с визуализацией дерева спанов (Waterfall chart).
+- 👁️ **Интерактивные стек-трейсы** — Подсветка синтаксиса (Prism.js) и скрытие системного кода (library frames) одной кнопкой.
+- 🍞 **Лента хлебных крошек** — Визуальный таймлайн действий пользователя (клики, запросы, консоль лог) перед ошибкой.
+- 🏷️ **Отслеживание релизов** — Отображение версии приложения для каждой ошибки с фиолетовыми бейджами релизов.
+- 🤖 **Интерактивный Telegram-бот** — Решайте ошибки прямо из чата с помощью кнопок действий.
+- ⚙️ **Роутинг уведомлений** — Указание индивидуальных Telegram/Discord вебхуков для каждого проекта.
+- 💬 **Локальные заметки** — Оставляйте комментарии и заметки по дебагу прямо на странице ошибки.
+- 🚀 **Умный авто-резолв** — Отмечайте баг как «решенный в следующем релизе», и система сама откроет его при регрессии.
 
 ### 🚀 Быстрый старт
 
@@ -401,7 +429,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 1.1.0
+  🛡️  Version     : 2.0.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1
@@ -427,15 +455,24 @@ go build -o pocketsentry .
 
 ### 🗺️ Дорожная карта
 
+<details>
+<summary><strong>✅ Выполненные задачи</strong></summary>
+
 - [x] Страница детального просмотра ошибки со стектрейсом
 - [x] Политика хранения (авто-удаление старых событий)
 - [x] Аутентификация
 - [x] Управление проектами (создание/удаление)
 - [x] Поддержка Source Maps
 - [x] Docker-образ
-- [ ] Экспорт данных логов (CSV/JSON)
-- [ ] Умный роутинг уведомлений (разные чаты для разных проектов)
-- [ ] Поддержка Транзакций (Performance Monitoring)
+- [x] Экспорт данных логов (CSV)
+- [x] Умный роутинг уведомлений (разные чаты для разных проектов)
+- [x] Интерактивный Telegram-бот (кнопки решения прямо из чата)
+- [x] Поддержка Транзакций (Performance Monitoring)
+- [x] Локальные заметки (комментарии прямо на странице ошибки)
+- [x] Умный авто-резолв (отслеживание регрессий в релизах)
+- [x] Заглушить на время (Snooze для подавления уведомлений)
+
+</details>
 
 ### 📄 Лицензия
 

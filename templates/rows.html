@@ -6,7 +6,7 @@
     </td>
 
     <!-- Project -->
-    <td class="px-6 py-3.5 whitespace-nowrap">
+    <td class="px-6 py-3.5 whitespace-nowrap text-center">
         <span class="inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-medium bg-gray-800 text-gray-300 ring-1 ring-gray-700/50">
             {{.ProjectID}}
         </span>
@@ -48,13 +48,33 @@
         {{end}}
     </td>
 
+    <!-- Release badge -->
+    <td class="px-6 py-3.5 whitespace-nowrap">
+        {{if .Release}}
+        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-brand-500/10 text-brand-300 ring-1 ring-brand-500/20">
+            <svg class="w-3 h-3 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"></path></svg>
+            {{.Release}}
+        </span>
+        {{else}}
+        <span class="text-[10px] text-gray-600">—</span>
+        {{end}}
+    </td>
+
     <!-- Message (truncated) -->
-    <td class="px-6 py-3.5 max-w-md">
+    <td class="px-6 py-3.5 max-w-0 w-full">
         <p class="text-sm text-gray-300 truncate" title="{{.Message}}">{{.Message}}</p>
     </td>
 
     <!-- Action -->
     <td class="px-6 py-3.5 text-right">
+        {{if eq .Status "snoozed"}}
+        <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/10 text-amber-400 ring-1 ring-amber-500/20" title="Snoozed">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0M3.124 7.5A8.969 8.969 0 015.292 3m13.416 0a8.969 8.969 0 012.168 4.5" />
+            </svg>
+            Snoozed
+        </span>
+        {{else}}
         <button 
             hx-post="/api/events/resolve/{{.ID}}" 
             hx-target="#event-{{.ID}}" 
@@ -66,6 +86,7 @@
             </svg>
             Resolve
         </button>
+        {{end}}
     </td>
 </tr>
 {{else}}

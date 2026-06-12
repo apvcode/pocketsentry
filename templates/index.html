@@ -135,6 +135,39 @@
         .liquid-glass-modal[open]::backdrop {
             animation: backdropShow 0.3s ease-out forwards;
         }
+
+        /* Closing animations */
+        @keyframes modalHide {
+            from {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+            to {
+                opacity: 0;
+                transform: scale(0.95) translateY(-12px);
+            }
+        }
+
+        @keyframes backdropHide {
+            from {
+                background: rgba(0, 0, 0, 0.5);
+                backdrop-filter: blur(8px);
+                -webkit-backdrop-filter: blur(8px);
+            }
+            to {
+                background: rgba(0, 0, 0, 0);
+                backdrop-filter: blur(0px);
+                -webkit-backdrop-filter: blur(0px);
+            }
+        }
+
+        .liquid-glass-modal.closing {
+            animation: modalHide 0.2s ease-in forwards !important;
+        }
+
+        .liquid-glass-modal.closing::backdrop {
+            animation: backdropHide 0.2s ease-in forwards !important;
+        }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen bg-grid">
@@ -196,8 +229,21 @@
             </div>
         </div>
 
-        <!-- Chart -->
-        <div class="glass-card rounded-2xl p-6 mb-8 shadow-lg">
+        <!-- Tabs -->
+        <div class="flex items-center gap-6 mb-6 border-b border-gray-800/80">
+            <button onclick="switchTab('errors')" id="tab-errors" class="text-brand-400 font-semibold px-1 py-3 border-b-2 border-brand-400 transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                Errors
+            </button>
+            <button onclick="switchTab('performance')" id="tab-performance" class="text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                Performance
+            </button>
+        </div>
+
+        <div id="view-errors" class="space-y-8 animate-fade-in">
+            <!-- Chart -->
+            <div class="glass-card rounded-2xl p-6 shadow-lg">
             <h2 class="text-sm font-semibold text-gray-200 mb-4 flex items-center gap-2">
                 <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
@@ -217,8 +263,8 @@
                     Recent Events
                 </h2>
                 
-                <div class="flex items-center gap-3">
-                    <button onclick="document.getElementById('project-modal').showModal()" class="text-xs px-3 py-1.5 bg-gray-800 text-gray-300 hover:text-white border border-gray-700 hover:border-gray-600 rounded-lg transition-colors flex items-center gap-1.5">
+                <form method="GET" action="/api/events/export" class="flex items-center gap-3">
+                    <button type="button" onclick="document.getElementById('project-modal').showModal()" class="text-xs px-3 py-1.5 bg-gray-800 text-gray-300 hover:text-white border border-gray-700 hover:border-gray-600 rounded-lg transition-colors flex items-center gap-1.5">
                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
                         New Project
                     </button>
@@ -228,12 +274,19 @@
                            hx-get="/api/events" 
                            hx-trigger="keyup changed delay:300ms, search" 
                            hx-target="#events-tbody" 
-                           hx-include="#level-filter, #project-filter">
+                           hx-include="#level-filter, #project-filter, #env-filter">
                     
                     <select id="project-filter" name="project" class="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2 outline-none">
                         <option value="All">All Projects</option>
                         {{range .Projects}}
                         <option value="{{.ID}}">{{.Name}} (ID: {{.ID}})</option>
+                        {{end}}
+                    </select>
+
+                    <select id="env-filter" name="environment" class="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2 outline-none">
+                        <option value="All">All Environments</option>
+                        {{range .Environments}}
+                        <option value="{{.}}">{{.}}</option>
                         {{end}}
                     </select>
 
@@ -244,26 +297,31 @@
                         <option value="fatal">Fatal</option>
                         <option value="info">Info</option>
                     </select>
-                    <span class="text-xs text-gray-600">auto-refresh every 2s</span>
-                </div>
+
+                    <button type="submit" class="text-xs px-3 py-1.5 bg-brand-600 hover:bg-brand-500 text-white rounded-lg transition-colors flex items-center gap-1.5 shadow-lg shadow-brand-500/20 font-medium">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+                        Export CSV
+                    </button>
+                </form>
             </div>
             <div class="overflow-x-auto">
-                <table class="w-full text-sm text-left" id="events-table">
+                <table class="w-full text-sm text-left table-fixed min-w-[800px]" id="events-table">
                     <thead>
                         <tr class="text-xs uppercase tracking-wider text-gray-500 border-b border-gray-800/40">
-                            <th class="px-6 py-3 font-medium">Last Seen</th>
-                            <th class="px-6 py-3 font-medium">Project</th>
-                            <th class="px-6 py-3 font-medium">Platform</th>
-                            <th class="px-6 py-3 font-medium">Level</th>
-                            <th class="px-6 py-3 font-medium">Count</th>
-                            <th class="px-6 py-3 font-medium">Message</th>
-                            <th class="px-6 py-3 font-medium text-right">Action</th>
+                            <th class="px-6 py-3 font-medium w-40 whitespace-nowrap">Last Seen</th>
+                            <th class="px-6 py-3 font-medium w-24 text-center">Project</th>
+                            <th class="px-6 py-3 font-medium w-28">Platform</th>
+                            <th class="px-6 py-3 font-medium w-24">Level</th>
+                            <th class="px-6 py-3 font-medium w-20">Count</th>
+                            <th class="px-6 py-3 font-medium w-28">Release</th>
+                            <th class="px-6 py-3 font-medium w-full">Message</th>
+                            <th class="px-6 py-3 font-medium text-right w-32">Action</th>
                         </tr>
                     </thead>
                     <tbody
                         hx-get="/api/events"
-                        hx-trigger="load, every 2s, change from:#level-filter, change from:#project-filter"
-                        hx-include="#level-filter, #search-input, #project-filter"
+                        hx-trigger="load, every 2s, change from:#level-filter, change from:#project-filter, change from:#env-filter"
+                        hx-include="#level-filter, #search-input, #project-filter, #env-filter"
                         hx-ext="morph"
                         hx-swap="morph:innerHTML"
                         id="events-tbody"
@@ -271,6 +329,13 @@
                         <!-- HTMX will fill this -->
                     </tbody>
                 </table>
+            </div>
+        </div>
+        </div> <!-- End view-errors -->
+
+        <div id="view-performance" class="hidden" hx-get="/api/performance" hx-trigger="loadPerformance from:body">
+            <div class="flex justify-center py-12">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-500"></div>
             </div>
         </div>
     </main>
@@ -286,28 +351,55 @@
     <dialog id="project-modal" class="liquid-glass-modal text-gray-100 rounded-2xl p-6 w-full max-w-md">
         <div class="flex items-center justify-between mb-4">
             <h3 class="text-lg font-semibold">Manage Projects</h3>
-            <button onclick="document.getElementById('project-modal').close()" class="text-gray-500 hover:text-white">
+            <button onclick="closeProjectModal()" class="text-gray-500 hover:text-white">
                 <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
         </div>
         
-        <div class="mb-6 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+        <div class="mb-6 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
             <ul class="space-y-2">
                 {{range .Projects}}
-                <li class="flex items-center justify-between bg-gray-800/50 border border-gray-700/50 p-2.5 rounded-lg">
-                    <div class="flex flex-col">
-                        <span class="text-sm font-medium text-gray-200">{{.Name}}</span>
-                        <span class="text-xs text-gray-500">ID: {{.ID}}</span>
+                <li class="flex flex-col bg-gray-800/50 border border-gray-700/50 p-2.5 rounded-lg">
+                    <div class="flex items-center justify-between">
+                        <div class="flex flex-col">
+                            <span class="text-sm font-medium text-gray-200">{{.Name}}</span>
+                            <span class="text-xs text-gray-500">ID: {{.ID}}</span>
+                        </div>
+                        <div class="flex items-center gap-1.5">
+                            <button type="button" onclick="toggleProjectSettings('{{.ID}}')" class="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700/50 rounded-md transition-colors" title="Project Webhooks">
+                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.43l-1.003.828c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.43l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
+                            </button>
+                            {{if ne .ID "1"}}
+                            <form action="/api/projects/delete/{{.ID}}" method="POST" onsubmit="return confirm('Delete this project and ALL its events forever?');" class="inline">
+                                <button type="submit" class="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded-md transition-colors" title="Delete Project">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                </button>
+                            </form>
+                            {{else}}
+                            <span class="text-[10px] text-gray-500 uppercase px-2 font-semibold tracking-wider">Default</span>
+                            {{end}}
+                        </div>
                     </div>
-                    {{if ne .ID "1"}}
-                    <form action="/api/projects/delete/{{.ID}}" method="POST" onsubmit="return confirm('Delete this project and ALL its events forever?');">
-                        <button type="submit" class="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded-md transition-colors" title="Delete Project">
-                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                        </button>
-                    </form>
-                    {{else}}
-                    <span class="text-xs text-gray-600 uppercase px-2">Default</span>
-                    {{end}}
+                    
+                    <div id="project-settings-{{.ID}}" class="hidden mt-3 pt-3 border-t border-gray-700/40 space-y-2">
+                        <form action="/api/projects/update/{{.ID}}" method="POST" class="space-y-3">
+                            <div>
+                                <label class="block text-[11px] font-medium text-gray-400 mb-1">Telegram Bot Token (override)</label>
+                                <input type="password" name="tg_token" value="{{.TGToken}}" placeholder="e.g. 123456:ABC-DEF..." class="w-full bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded p-2 outline-none focus:border-brand-500">
+                            </div>
+                            <div>
+                                <label class="block text-[11px] font-medium text-gray-400 mb-1">Telegram Chat ID (override)</label>
+                                <input type="text" name="tg_chat_id" value="{{.TGChatID}}" placeholder="e.g. -10012345678" class="w-full bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded p-2 outline-none focus:border-brand-500">
+                            </div>
+                            <div>
+                                <label class="block text-[11px] font-medium text-gray-400 mb-1">Discord Webhook (override)</label>
+                                <input type="password" name="discord_webhook" value="{{.DiscordWebhook}}" placeholder="e.g. https://discord.com/api/webhooks/..." class="w-full bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded p-2 outline-none focus:border-brand-500">
+                            </div>
+                            <button type="submit" class="w-full text-xs bg-brand-600 hover:bg-brand-500 text-white rounded py-2 font-semibold transition-colors shadow-lg shadow-brand-500/20">
+                                Save Webhooks
+                            </button>
+                        </form>
+                    </div>
                 </li>
                 {{end}}
             </ul>
@@ -361,11 +453,60 @@
                         },
                         theme: { mode: 'dark' }
                     };
-
+                    
                     const chart = new ApexCharts(document.querySelector("#chart"), options);
                     chart.render();
                 })
                 .catch(err => console.error('Failed to load stats:', err));
+        });
+
+        function toggleProjectSettings(id) {
+            const el = document.getElementById(`project-settings-${id}`);
+            if (el.classList.contains('hidden')) {
+                el.classList.remove('hidden');
+            } else {
+                el.classList.add('hidden');
+            }
+        }
+
+        function switchTab(tab) {
+            const errView = document.getElementById('view-errors');
+            const perfView = document.getElementById('view-performance');
+            const errTab = document.getElementById('tab-errors');
+            const perfTab = document.getElementById('tab-performance');
+
+            if (tab === 'errors') {
+                errView.classList.remove('hidden');
+                perfView.classList.add('hidden');
+                errTab.className = "text-brand-400 font-semibold px-1 py-3 border-b-2 border-brand-400 transition-colors text-sm flex items-center gap-2";
+                perfTab.className = "text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2";
+            } else if (tab === 'performance') {
+                perfView.classList.remove('hidden');
+                errView.classList.add('hidden');
+                perfTab.className = "text-brand-400 font-semibold px-1 py-3 border-b-2 border-brand-400 transition-colors text-sm flex items-center gap-2";
+                errTab.className = "text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2";
+                
+                // Trigger HTMX load if not loaded yet
+                document.body.dispatchEvent(new Event('loadPerformance'));
+            }
+        }
+
+        function closeProjectModal() {
+            const modal = document.getElementById('project-modal');
+            modal.classList.add('closing');
+            const handleAnimationEnd = (e) => {
+                if (e.animationName === 'modalHide') {
+                    modal.classList.remove('closing');
+                    modal.close();
+                    modal.removeEventListener('animationend', handleAnimationEnd);
+                }
+            };
+            modal.addEventListener('animationend', handleAnimationEnd);
+        }
+
+        document.getElementById('project-modal').addEventListener('cancel', (e) => {
+            e.preventDefault();
+            closeProjectModal();
         });
     </script>
 </body>
