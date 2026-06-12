@@ -224,6 +224,10 @@ go build -o pocketsentry .
 
 ### 🗺️ Roadmap
 
+- [ ] **Smart Grouping**: Custom regex-based rules to merge similar events (e.g. stripping dynamic IDs or hashes from messages).
+- [ ] **System & DB Metrics**: Dashboard charts for SQLite database size, error ingestion rates (RPS), and retention cleanup stats.
+- [ ] **Attachments Support**: Store and display screenshots, logs, and other files uploaded via the Sentry SDK.
+
 <details>
 <summary><strong>✅ Completed Features</strong></summary>
 
@@ -239,15 +243,6 @@ go build -o pocketsentry .
 - [x] Transactions support (Performance Monitoring)
 - [x] Local Issue Notes (comments directly on errors)
 - [x] Snooze Alert (Mute error notifications for a specific time)
-
-</details>
-
-<details>
-<summary><strong>⏳ Planned Features</strong></summary>
-
-- [ ] **Smart Issue Grouping**: Custom regex-based rules to merge events (e.g. stripping dynamic IDs or hashes from messages).
-- [ ] **System Metrics & Database Health**: Dashboard charts for SQLite database size, error ingestion rates (RPS), and retention cleanup stats.
-- [ ] **Attachments Support**: Store and display screenshots, logs, and other files uploaded via the Sentry SDK.
 
 </details>
 
@@ -463,6 +458,10 @@ go build -o pocketsentry .
 
 ### 🗺️ Дорожная карта
 
+- [ ] **Умное группирование**: Пользовательские правила на основе регулярных выражений для объединения похожих ошибок (например, вырезание динамических ID или хешей из сообщений).
+- [ ] **Здоровье системы и БД**: Графики размера базы SQLite, объема входящих запросов (RPS) и детальной статистики очистки устаревших данных.
+- [ ] **Поддержка вложений**: Сохранение и отображение скриншотов, логов и файлов, отправленных клиентом через Sentry SDK.
+
 <details>
 <summary><strong>✅ Выполненные задачи</strong></summary>
 
@@ -478,15 +477,6 @@ go build -o pocketsentry .
 - [x] Поддержка Транзакций (Performance Monitoring)
 - [x] Локальные заметки (комментарии прямо на странице ошибки)
 - [x] Заглушить на время (Snooze для подавления уведомлений)
-
-</details>
-
-<details>
-<summary><strong>⏳ Предстоящие задачи</strong></summary>
-
-- [ ] **Умное группирование**: Пользовательские правила на основе регулярных выражений для объединения похожих ошибок (например, вырезание динамических ID или хешей из сообщений).
-- [ ] **Здоровье системы и БД**: Графики размера базы SQLite, объема входящих запросов (RPS) и детальной статистики очистки устаревших данных.
-- [ ] **Поддержка вложений**: Сохранение и отображение скриншотов, логов и файлов, отправленных клиентом через Sentry SDK.
 
 </details>
 
