@@ -36,7 +36,7 @@ import (
 )
 
 // currentVersion is the version of this binary, compared against GitHub releases.
-const currentVersion = "v2.1.0"
+const currentVersion = "v3.0.0"
 
 // templateFS embeds the templates directory into the binary so the final
 // executable is fully self-contained — no external files needed.
@@ -2948,7 +2948,7 @@ const banner = `
 func printBanner(port, dbPath, user string, retDays int) {
 	fmt.Print(banner)
 	fmt.Println("  ──────────────────────────────────────────────────")
-	fmt.Printf("  🛡️  Version     : 2.1.0\n")
+	fmt.Printf("  🛡️  Version     : 3.0.0\n")
 	fmt.Printf("  🌐 Dashboard   : http://localhost:%s\n", port)
 	fmt.Printf("  📦 Database    : %s\n", dbPath)
 	fmt.Printf("  🔗 DSN         : http://public@localhost:%s/1\n", port)
