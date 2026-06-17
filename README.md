@@ -225,7 +225,9 @@ go build -o pocketsentry .
 ### 🗺️ Roadmap
 
 **General Roadmap:**
-- [ ] *All immediate app-level features are completed!*
+- [ ] **🎥 Session Replay**: Support and visualize user session recordings (sent by Sentry SDK via `rrweb`) to see exactly what the user did before the crash.
+- [ ] **🐳 Docker & Kubernetes eBPF Metadata**: Enrich connection topology with container names and pod namespace info using Docker/k8s APIs.
+- [ ] **🪵 Centralized Log Streaming**: Act as a lightweight log aggregator (like Loki) to query stdout/stderr application logs inside the UI.
 
 <details>
 <summary><strong>✅ Completed Features</strong></summary>
@@ -466,7 +468,9 @@ go build -o pocketsentry .
 ### 🗺️ Дорожная карта
 
 **Ближайшие планы:**
-- [ ] *Все прикладные задачи завершены!*
+- [ ] **🎥 Воспроизведение сессий (Session Replay)**: Поддержка записей действий пользователей (через `rrweb` в Sentry SDK) с воспроизведением «видео» прямо в деталях ошибки.
+- [ ] **🐳 eBPF-интеграция с Docker и K8s**: Отображение реальных имен Docker-контейнеров и Kubernetes-подов на карте сети вместо сырых IP/PID.
+- [ ] **🪵 Сбор сырых логов (Log Aggregation)**: Полноценный поиск по логам приложений (stdout/stderr) в реальном времени прямо на дашборде.
 
 <details>
 <summary><strong>✅ Выполненные задачи</strong></summary>
