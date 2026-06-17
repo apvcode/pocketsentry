@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"embed"
+	"math"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
@@ -19,9 +20,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,7 +33,7 @@ import (
 )
 
 // currentVersion is the version of this binary, compared against GitHub releases.
-const currentVersion = "v2.0.0"
+const currentVersion = "v2.1.0"
 
 // templateFS embeds the templates directory into the binary so the final
 // executable is fully self-contained — no external files needed.
@@ -160,6 +163,24 @@ func initDB(path string) error {
 			timestamp DATETIME NOT NULL,
 			duration_ms REAL NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS grouping_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id TEXT NOT NULL DEFAULT '',
+			pattern TEXT NOT NULL,
+			replacement TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE IF NOT EXISTS attachments (
+			id TEXT PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			filename TEXT NOT NULL,
+			content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_attachments_event ON attachments(event_id);
 	`)
 	if err != nil {
 		return fmt.Errorf("create performance tables: %w", err)
@@ -174,6 +195,197 @@ func initDB(path string) error {
 	return nil
 }
 
+// ---------- Ingestion Metrics ----------
+
+var (
+	ingestCount    int64 // atomic counter for events ingested
+	ingestCountMin int64 // snapshot for per-minute rate
+	dbFilePath     string
+)
+
+func incrIngestCount() {
+	atomic.AddInt64(&ingestCount, 1)
+}
+
+// ---------- Smart Grouping ----------
+
+// applyGroupingRules normalizes the event message by applying all enabled
+// grouping rules for the given project. This allows deduplication of events
+// that differ only by dynamic IDs, hashes, or timestamps.
+func applyGroupingRules(msg, projectID string) string {
+	rows, err := db.Query(
+		`SELECT pattern, replacement FROM grouping_rules
+		 WHERE enabled = 1 AND (project_id = '' OR project_id = ?)
+		 ORDER BY id ASC`, projectID)
+	if err != nil {
+		return msg
+	}
+	defer rows.Close()
+
+	normalized := msg
+	for rows.Next() {
+		var pattern, replacement string
+		if err := rows.Scan(&pattern, &replacement); err != nil {
+			continue
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			continue
+		}
+		normalized = re.ReplaceAllString(normalized, replacement)
+	}
+	return normalized
+}
+
+// ---------- Attachments ----------
+
+// saveAttachment stores an attachment file on disk and records metadata in the DB.
+func saveAttachment(eventID, filename, contentType string, data []byte) error {
+	dir := filepath.Join("data", "attachments", eventID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("mkdir attachments: %w", err)
+	}
+
+	// Sanitize filename
+	safeName := filepath.Base(filename)
+	if safeName == "" || safeName == "." || safeName == ".." {
+		safeName = "attachment"
+	}
+
+	filePath := filepath.Join(dir, safeName)
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return fmt.Errorf("write attachment: %w", err)
+	}
+
+	id := generateUUID()
+	_, err := db.Exec(
+		`INSERT INTO attachments (id, event_id, filename, content_type, size_bytes)
+		 VALUES (?, ?, ?, ?, ?)`,
+		id, eventID, safeName, contentType, len(data),
+	)
+	if err != nil {
+		return fmt.Errorf("insert attachment: %w", err)
+	}
+
+	log.Printf("[attachment] saved %s (%d bytes) for event %s", safeName, len(data), eventID)
+	return nil
+}
+
+// Attachment is the struct for attachment metadata.
+type Attachment struct {
+	ID          string
+	EventID     string
+	Filename    string
+	ContentType string
+	SizeBytes   int
+	CreatedAt   string
+	IsImage     bool
+}
+
+// queryAttachments returns all attachments for a given event.
+func queryAttachments(eventID string) []Attachment {
+	rows, err := db.Query(
+		`SELECT id, filename, content_type, size_bytes, created_at
+		 FROM attachments WHERE event_id = ? ORDER BY created_at ASC`, eventID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var result []Attachment
+	for rows.Next() {
+		var a Attachment
+		if err := rows.Scan(&a.ID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.CreatedAt); err != nil {
+			continue
+		}
+		a.EventID = eventID
+		a.IsImage = strings.HasPrefix(a.ContentType, "image/")
+		a.CreatedAt = formatTimestamp(a.CreatedAt)
+		result = append(result, a)
+	}
+	return result
+}
+
+// ---------- System Metrics ----------
+
+// SystemMetrics holds all system health data for the dashboard.
+type SystemMetrics struct {
+	Version          string  `json:"version"`
+	Uptime           string  `json:"uptime"`
+	UptimeSeconds    float64 `json:"uptime_seconds"`
+	DBSizeBytes      int64   `json:"db_size_bytes"`
+	DBSizeHuman      string  `json:"db_size_human"`
+	TotalEvents      int     `json:"total_events"`
+	UnresolvedEvents int     `json:"unresolved_events"`
+	ResolvedEvents   int     `json:"resolved_events"`
+	SnoozedEvents    int     `json:"snoozed_events"`
+	TotalProjects    int     `json:"total_projects"`
+	TotalTransactions int    `json:"total_transactions"`
+	EventsPerMinute  float64 `json:"events_per_minute"`
+	TotalAttachments int     `json:"total_attachments"`
+	GroupingRules    int     `json:"grouping_rules"`
+	RetentionDays    int     `json:"retention_days"`
+	GoVersion        string  `json:"go_version"`
+	GoRoutines       int     `json:"goroutines"`
+	MemAllocMB       float64 `json:"mem_alloc_mb"`
+}
+
+func querySystemMetrics() SystemMetrics {
+	m := SystemMetrics{
+		Version:       currentVersion,
+		Uptime:        time.Since(startTime).Round(time.Second).String(),
+		UptimeSeconds: time.Since(startTime).Seconds(),
+		RetentionDays: globalRetentionDays,
+		GoVersion:     runtime.Version(),
+		GoRoutines:    runtime.NumGoroutine(),
+	}
+
+	// Memory stats
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	m.MemAllocMB = math.Round(float64(memStats.Alloc)/1024/1024*100) / 100
+
+	// DB file size
+	if dbFilePath != "" {
+		if info, err := os.Stat(dbFilePath); err == nil {
+			m.DBSizeBytes = info.Size()
+			m.DBSizeHuman = humanBytes(info.Size())
+		}
+	}
+
+	// Counts
+	_ = db.QueryRow("SELECT COUNT(*) FROM events").Scan(&m.TotalEvents)
+	_ = db.QueryRow("SELECT COUNT(*) FROM events WHERE status = 'unresolved'").Scan(&m.UnresolvedEvents)
+	_ = db.QueryRow("SELECT COUNT(*) FROM events WHERE status = 'resolved'").Scan(&m.ResolvedEvents)
+	_ = db.QueryRow("SELECT COUNT(*) FROM events WHERE status = 'snoozed'").Scan(&m.SnoozedEvents)
+	_ = db.QueryRow("SELECT COUNT(*) FROM projects").Scan(&m.TotalProjects)
+	_ = db.QueryRow("SELECT COUNT(*) FROM transactions").Scan(&m.TotalTransactions)
+	_ = db.QueryRow("SELECT COUNT(*) FROM attachments").Scan(&m.TotalAttachments)
+	_ = db.QueryRow("SELECT COUNT(*) FROM grouping_rules WHERE enabled = 1").Scan(&m.GroupingRules)
+
+	// Events per minute (based on atomic counter)
+	total := atomic.LoadInt64(&ingestCount)
+	upMin := time.Since(startTime).Minutes()
+	if upMin > 0 {
+		m.EventsPerMinute = math.Round(float64(total)/upMin*100) / 100
+	}
+
+	return m
+}
+
+func humanBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
 // saveEvent inserts a new event or increments the counter of an existing
 // duplicate. Duplicates are identified by (project_id, message, level).
 func saveEvent(ev SentryEvent, projectID, rawPayload string) error {
@@ -183,6 +395,12 @@ func saveEvent(ev SentryEvent, projectID, rawPayload string) error {
 	if ev.Level == "" {
 		ev.Level = "error"
 	}
+
+	// Track ingestion rate
+	incrIngestCount()
+
+	// Apply smart grouping rules to normalize the message for dedup
+	ev.Message = applyGroupingRules(ev.Message, projectID)
 
 	ts := time.Now().UTC()
 	if ev.Timestamp != "" {
@@ -664,6 +882,8 @@ type EventDetail struct {
 	Breadcrumbs []Breadcrumb
 	HasBreadcrumbs bool
 	Comments    []EventComment
+	Attachments []Attachment
+	HasAttachments bool
 	HasLibraryFrames bool
 	RawJSON     string
 }
@@ -822,6 +1042,10 @@ func queryEventByID(id string) (*EventDetail, error) {
 			}
 		}
 	}
+
+	// Fetch attachments
+	ev.Attachments = queryAttachments(id)
+	ev.HasAttachments = len(ev.Attachments) > 0
 
 	return &ev, nil
 }
@@ -1496,7 +1720,41 @@ func envelopeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Process attachments from envelope
+	extractAndSaveAttachments(body, eventID)
+
 	respondWithID(w, eventID)
+}
+
+// extractAndSaveAttachments scans an envelope for attachment items and saves them.
+func extractAndSaveAttachments(envelopeData []byte, eventID string) {
+	if eventID == "" {
+		return
+	}
+	lines := splitEnvelopeLines(envelopeData)
+	for i := 1; i+1 < len(lines); i += 2 {
+		var itemHeader struct {
+			Type        string `json:"type"`
+			Filename    string `json:"filename"`
+			ContentType string `json:"content_type"`
+		}
+		if err := json.Unmarshal(lines[i], &itemHeader); err != nil {
+			continue
+		}
+		if strings.ToLower(itemHeader.Type) == "attachment" {
+			ct := itemHeader.ContentType
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			fn := itemHeader.Filename
+			if fn == "" {
+				fn = "attachment"
+			}
+			if err := saveAttachment(eventID, fn, ct, lines[i+1]); err != nil {
+				log.Printf("[envelope] save attachment error: %v", err)
+			}
+		}
+	}
 }
 
 // performanceHandler renders the performance tab content.
@@ -1661,6 +1919,141 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)
+}
+
+// systemMetricsHandler returns JSON with system health metrics.
+func systemMetricsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(querySystemMetrics())
+}
+
+// groupingRulesHandler handles GET (list) and POST (create) for grouping rules.
+func groupingRulesHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := db.Query("SELECT id, project_id, pattern, replacement, description, enabled FROM grouping_rules ORDER BY id ASC")
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		type Rule struct {
+			ID          int    `json:"id"`
+			ProjectID   string `json:"project_id"`
+			Pattern     string `json:"pattern"`
+			Replacement string `json:"replacement"`
+			Description string `json:"description"`
+			Enabled     bool   `json:"enabled"`
+		}
+		var rules []Rule
+		for rows.Next() {
+			var r Rule
+			var enabled int
+			if err := rows.Scan(&r.ID, &r.ProjectID, &r.Pattern, &r.Replacement, &r.Description, &enabled); err == nil {
+				r.Enabled = enabled == 1
+				rules = append(rules, r)
+			}
+		}
+		if rules == nil {
+			rules = []Rule{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(rules)
+
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		pattern := strings.TrimSpace(r.FormValue("pattern"))
+		if pattern == "" {
+			http.Error(w, "pattern is required", http.StatusBadRequest)
+			return
+		}
+		// Validate regex
+		if _, err := regexp.Compile(pattern); err != nil {
+			http.Error(w, "invalid regex: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		replacement := r.FormValue("replacement")
+		description := r.FormValue("description")
+		projectID := r.FormValue("project_id")
+
+		_, err := db.Exec(
+			"INSERT INTO grouping_rules (project_id, pattern, replacement, description) VALUES (?, ?, ?, ?)",
+			projectID, pattern, replacement, description,
+		)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// If HTMX request, refresh page
+		if r.Header.Get("HX-Request") == "true" {
+			w.Header().Set("HX-Refresh", "true")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// deleteGroupingRuleHandler deletes a specific grouping rule.
+func deleteGroupingRuleHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/grouping-rules/delete/")
+	if id == "" {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+	_, err := db.Exec("DELETE FROM grouping_rules WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Refresh", "true")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// attachmentHandler serves attachment files from disk.
+func attachmentHandler(w http.ResponseWriter, r *http.Request) {
+	// URL: /api/attachments/{event_id}/{filename}
+	path := strings.TrimPrefix(r.URL.Path, "/api/attachments/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	eventID := parts[0]
+	filename := filepath.Base(parts[1])
+
+	filePath := filepath.Join("data", "attachments", eventID, filename)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Query content type from DB
+	var contentType string
+	err := db.QueryRow("SELECT content_type FROM attachments WHERE event_id = ? AND filename = ?", eventID, filename).Scan(&contentType)
+	if err != nil {
+		contentType = "application/octet-stream"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	http.ServeFile(w, r, filePath)
 }
 
 // respondWithID sends a 200 JSON response with the given event ID.
@@ -1940,6 +2333,22 @@ func newRouter() http.Handler {
 		protected.ServeHTTP(w, r)
 	})))
 
+	mux.Handle("/api/system-metrics", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		systemMetricsHandler(w, r)
+	})))
+
+	mux.Handle("/api/grouping-rules", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		groupingRulesHandler(w, r)
+	})))
+
+	mux.Handle("/api/grouping-rules/delete/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deleteGroupingRuleHandler(w, r)
+	})))
+
+	mux.Handle("/api/attachments/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attachmentHandler(w, r)
+	})))
+
 	// Public health check endpoint
 	mux.HandleFunc("/health", healthHandler)
 
@@ -2114,7 +2523,7 @@ const banner = `
 func printBanner(port, dbPath, user string, retDays int) {
 	fmt.Print(banner)
 	fmt.Println("  ──────────────────────────────────────────────────")
-	fmt.Printf("  🛡️  Version     : 2.0.0\n")
+	fmt.Printf("  🛡️  Version     : 2.1.0\n")
 	fmt.Printf("  🌐 Dashboard   : http://localhost:%s\n", port)
 	fmt.Printf("  📦 Database    : %s\n", dbPath)
 	fmt.Printf("  🔗 DSN         : http://public@localhost:%s/1\n", port)
@@ -2194,6 +2603,7 @@ func main() {
 	}
 
 	// Initialize database.
+	dbFilePath = *dbPath
 	if err := initDB(*dbPath); err != nil {
 		log.Fatalf("Database init failed: %v", err)
 	}

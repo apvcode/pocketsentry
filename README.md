@@ -198,7 +198,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 2.0.0
+  🛡️  Version     : 2.1.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1
@@ -435,7 +435,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 2.0.0
+  🛡️  Version     : 2.1.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1

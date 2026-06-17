@@ -239,6 +239,10 @@
                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                 Performance
             </button>
+            <button onclick="switchTab('system')" id="tab-system" class="text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.25 14.25h13.5m-13.5 0a3 3 0 0 1-3-3m3 3a3 3 0 1 0 0 6h13.5a3 3 0 1 0 0-6m-16.5-3a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3m-19.5 0a4.5 4.5 0 0 1 .9-2.7L5.737 5.1a3.375 3.375 0 0 1 2.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 0 1 .9 2.7m0 0a3 3 0 0 1-3 3m0 3h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Zm-3 6h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Z"></path></svg>
+                System
+            </button>
         </div>
 
         <div id="view-errors" class="space-y-8 animate-fade-in">
@@ -336,6 +340,54 @@
         <div id="view-performance" class="hidden" hx-get="/api/performance" hx-trigger="loadPerformance from:body">
             <div class="flex justify-center py-12">
                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-500"></div>
+            </div>
+        </div>
+
+        <div id="view-system" class="hidden space-y-6">
+            <!-- System metrics will be loaded via JS -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="system-metrics-grid">
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">DB Size</p><p class="mt-1 text-lg font-bold text-brand-400" id="metric-db-size">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Total Events</p><p class="mt-1 text-lg font-bold text-emerald-400" id="metric-total-events">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Events/min</p><p class="mt-1 text-lg font-bold text-amber-400" id="metric-events-per-min">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Uptime</p><p class="mt-1 text-lg font-bold text-blue-400" id="metric-uptime">—</p></div>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Unresolved</p><p class="mt-1 text-lg font-bold text-red-400" id="metric-unresolved">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Resolved</p><p class="mt-1 text-lg font-bold text-emerald-400" id="metric-resolved">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Snoozed</p><p class="mt-1 text-lg font-bold text-amber-400" id="metric-snoozed">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Attachments</p><p class="mt-1 text-lg font-bold text-blue-400" id="metric-attachments">—</p></div>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Transactions</p><p class="mt-1 text-lg font-bold text-brand-400" id="metric-transactions">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Memory</p><p class="mt-1 text-lg font-bold text-pink-400" id="metric-mem">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Goroutines</p><p class="mt-1 text-lg font-bold text-cyan-400" id="metric-goroutines">—</p></div>
+                <div class="glass-card rounded-xl p-4 text-center"><p class="text-[10px] font-medium text-gray-500 uppercase">Go Version</p><p class="mt-1 text-lg font-bold text-gray-300" id="metric-go-version">—</p></div>
+            </div>
+
+            <!-- Grouping Rules -->
+            <div class="glass-card rounded-2xl p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                        <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" /></svg>
+                        Smart Grouping Rules
+                    </h2>
+                </div>
+                <p class="text-xs text-gray-500 mb-4">Regex patterns to normalize error messages before deduplication. Dynamic IDs, hashes, and timestamps will be stripped so similar errors get grouped together.</p>
+                
+                <!-- Add rule form -->
+                <form hx-post="/api/grouping-rules" hx-swap="none" class="flex flex-col sm:flex-row gap-2 mb-4">
+                    <input type="text" name="pattern" placeholder="Regex pattern (e.g. [0-9a-f]{8,})" required class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                    <input type="text" name="replacement" placeholder="Replacement (e.g. <ID>)" class="w-32 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                    <input type="text" name="description" placeholder="Description" class="w-40 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                    <button type="submit" class="px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold rounded-lg transition-colors">Add Rule</button>
+                </form>
+
+                <!-- Existing rules -->
+                <div id="grouping-rules-list" class="space-y-2">
+                    <!-- Loaded via JS -->
+                </div>
             </div>
         </div>
     </main>
@@ -470,25 +522,73 @@
         }
 
         function switchTab(tab) {
-            const errView = document.getElementById('view-errors');
-            const perfView = document.getElementById('view-performance');
-            const errTab = document.getElementById('tab-errors');
-            const perfTab = document.getElementById('tab-performance');
+            const views = ['errors', 'performance', 'system'];
+            views.forEach(v => {
+                const view = document.getElementById('view-' + v);
+                const tabBtn = document.getElementById('tab-' + v);
+                if (v === tab) {
+                    view.classList.remove('hidden');
+                    tabBtn.className = "text-brand-400 font-semibold px-1 py-3 border-b-2 border-brand-400 transition-colors text-sm flex items-center gap-2";
+                } else {
+                    view.classList.add('hidden');
+                    tabBtn.className = "text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2";
+                }
+            });
 
-            if (tab === 'errors') {
-                errView.classList.remove('hidden');
-                perfView.classList.add('hidden');
-                errTab.className = "text-brand-400 font-semibold px-1 py-3 border-b-2 border-brand-400 transition-colors text-sm flex items-center gap-2";
-                perfTab.className = "text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2";
-            } else if (tab === 'performance') {
-                perfView.classList.remove('hidden');
-                errView.classList.add('hidden');
-                perfTab.className = "text-brand-400 font-semibold px-1 py-3 border-b-2 border-brand-400 transition-colors text-sm flex items-center gap-2";
-                errTab.className = "text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2";
-                
-                // Trigger HTMX load if not loaded yet
+            if (tab === 'performance') {
                 document.body.dispatchEvent(new Event('loadPerformance'));
             }
+            if (tab === 'system') {
+                loadSystemMetrics();
+                loadGroupingRules();
+            }
+        }
+
+        function loadSystemMetrics() {
+            fetch('/api/system-metrics')
+                .then(r => r.json())
+                .then(m => {
+                    document.getElementById('metric-db-size').textContent = m.db_size_human || '—';
+                    document.getElementById('metric-total-events').textContent = m.total_events;
+                    document.getElementById('metric-events-per-min').textContent = m.events_per_minute;
+                    document.getElementById('metric-uptime').textContent = m.uptime;
+                    document.getElementById('metric-unresolved').textContent = m.unresolved_events;
+                    document.getElementById('metric-resolved').textContent = m.resolved_events;
+                    document.getElementById('metric-snoozed').textContent = m.snoozed_events;
+                    document.getElementById('metric-attachments').textContent = m.total_attachments;
+                    document.getElementById('metric-transactions').textContent = m.total_transactions;
+                    document.getElementById('metric-mem').textContent = m.mem_alloc_mb + ' MB';
+                    document.getElementById('metric-goroutines').textContent = m.goroutines;
+                    document.getElementById('metric-go-version').textContent = m.go_version;
+                })
+                .catch(err => console.error('Failed to load system metrics:', err));
+        }
+
+        function loadGroupingRules() {
+            fetch('/api/grouping-rules')
+                .then(r => r.json())
+                .then(rules => {
+                    const list = document.getElementById('grouping-rules-list');
+                    if (!rules || rules.length === 0) {
+                        list.innerHTML = '<p class="text-xs text-gray-600 text-center py-4">No grouping rules configured yet. Add one above.</p>';
+                        return;
+                    }
+                    list.innerHTML = rules.map(r => `
+                        <div class="flex items-center justify-between bg-gray-800/50 border border-gray-700/50 rounded-lg px-4 py-2.5">
+                            <div class="flex items-center gap-3 min-w-0">
+                                <code class="text-xs text-brand-300 font-mono truncate">${r.pattern}</code>
+                                <span class="text-[10px] text-gray-600">→</span>
+                                <code class="text-xs text-emerald-400 font-mono">${r.replacement || '(empty)'}</code>
+                                ${r.description ? `<span class="text-[10px] text-gray-500 truncate">— ${r.description}</span>` : ''}
+                            </div>
+                            <button hx-post="/api/grouping-rules/delete/${r.id}" hx-swap="none" class="text-gray-600 hover:text-red-400 transition-colors p-1">
+                                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </button>
+                        </div>
+                    `).join('');
+                    htmx.process(list);
+                })
+                .catch(err => console.error('Failed to load grouping rules:', err));
         }
 
         function closeProjectModal() {
