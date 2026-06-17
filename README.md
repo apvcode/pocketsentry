@@ -224,17 +224,14 @@ go build -o pocketsentry .
 
 ### 🗺️ Roadmap
 
-**🔥 The v3.0 Vision: Zero-Config eBPF APM**
-- [x] **Linux eBPF Agent**: Catch 500 Internal Server Errors, database latency, and timeouts directly from the Linux kernel *without any code changes or SDKs*.
-- [x] **Network Topology Map**: Visual dashboard showing how your Docker containers/services interact and where the bottlenecks are.
-*(Will be optional via `--enable-ebpf` flag. PocketSentry remains a lightweight single binary!)*
-
 **General Roadmap:**
-- [ ] *All immediate app-level features are completed! Focus shifting to eBPF APM.*
+- [ ] *All immediate app-level features are completed!*
 
 <details>
 <summary><strong>✅ Completed Features</strong></summary>
 
+- [x] **Linux eBPF Agent**: Catch 500 Internal Server Errors and connection tracking directly from the Linux kernel without SDKs (run with `--enable-ebpf`).
+- [x] **Network Topology Map**: Visual dashboard showing how your Docker containers/services interact.
 - [x] **Smart Alerting Rules**: Conditional routing for webhooks (e.g., notify only if an error occurs > 10 times in 5 minutes).
 - [x] **Source Maps API Upload**: Dedicated API endpoint to upload `.map` files directly from CI/CD pipelines.
 - [x] **Latency Analytics**: Interactive dashboard graphs showing transaction percentile metrics (p50, p90, p99).
@@ -468,17 +465,14 @@ go build -o pocketsentry .
 
 ### 🗺️ Дорожная карта
 
-**🔥 Главная цель v3.0: Zero-Config eBPF APM**
-- [x] **eBPF Агент (Linux)**: Перехват 500-х HTTP ошибок, зависаний БД и сетевых таймаутов прямо из ядра Linux *без единой строчки кода и без установки SDK*.
-- [x] **Карта сети (Topology)**: Визуальный дашборд взаимодействия ваших Docker-контейнеров с подсветкой узких мест.
-*(Будет опциональным модулем через флаг `--enable-ebpf`. PocketSentry останется единым лёгким бинарником!)*
-
 **Ближайшие планы:**
-- [ ] *Все прикладные задачи завершены! Переходим к интеграции eBPF.*
+- [ ] *Все прикладные задачи завершены!*
 
 <details>
 <summary><strong>✅ Выполненные задачи</strong></summary>
 
+- [x] **eBPF Агент (Linux)**: Перехват 500-х HTTP ошибок из ядра Linux без изменения кода приложения (запуск с флагом `--enable-ebpf`).
+- [x] **Карта сети (Topology)**: Визуальный дашборд взаимодействия ваших Docker-контейнеров с подсветкой узких мест.
 - [x] **Умные правила уведомлений**: Настройка условий отправки алертов (например, отправлять уведомление только если ошибка произошла более 10 раз за 5 минут).
 - [x] **Загрузка Source Maps через API**: API-эндпоинт для автоматической отправки `.map` файлов напрямую из CI/CD пайплайнов.
 - [x] **Аналитика задержек (Latency)**: Графики перцентилей (p50, p90, p99) для отслеживания деградации скорости ответа транзакций на дашборде.
