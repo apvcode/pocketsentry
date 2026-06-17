@@ -5,12 +5,10 @@
     </div>
 
     <!-- Stats summary (optional nice touch) -->
-    <div class="grid grid-cols-3 gap-4">
+    <div class="grid grid-cols-1 gap-4 mb-6">
         <div class="bg-gray-800/80 border border-gray-700/50 rounded-xl p-4 shadow-xl">
-            <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Performance Tracked</h3>
-            <div class="text-2xl font-bold text-white flex items-baseline gap-2">
-                {{len .Groups}} <span class="text-sm font-normal text-gray-400">Routes</span>
-            </div>
+            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">24h Latency Percentiles (p50, p90, p99)</h3>
+            <div id="latency-chart" class="w-full h-[250px]"></div>
         </div>
     </div>
 
@@ -60,4 +58,60 @@
             </table>
         </div>
     </div>
+    </div>
 </div>
+
+<script>
+    (function() {
+        fetch('/api/performance/analytics')
+            .then(res => res.json())
+            .then(data => {
+                if (!data || data.length === 0) {
+                    document.getElementById('latency-chart').innerHTML = '<div class="flex items-center justify-center h-full text-gray-500 text-sm">No transaction data available</div>';
+                    return;
+                }
+
+                const options = {
+                    series: [
+                        { name: 'p50', data: data.map(d => d.p50) },
+                        { name: 'p90', data: data.map(d => d.p90) },
+                        { name: 'p99', data: data.map(d => d.p99) }
+                    ],
+                    chart: {
+                        type: 'area',
+                        height: 250,
+                        toolbar: { show: false },
+                        background: 'transparent',
+                        fontFamily: 'Inter, sans-serif'
+                    },
+                    colors: ['#10b981', '#f59e0b', '#ef4444'],
+                    fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.3, opacityTo: 0.05, stops: [0, 100] } },
+                    dataLabels: { enabled: false },
+                    stroke: { curve: 'smooth', width: 2 },
+                    xaxis: {
+                        categories: data.map(d => {
+                            const date = new Date(d.bucket);
+                            return date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        }),
+                        labels: { style: { colors: '#9ca3af' } },
+                        axisBorder: { show: false },
+                        axisTicks: { show: false }
+                    },
+                    yaxis: {
+                        labels: {
+                            style: { colors: '#9ca3af' },
+                            formatter: (value) => { return value.toFixed(0) + " ms" }
+                        }
+                    },
+                    grid: { borderColor: '#374151', strokeDashArray: 3 },
+                    theme: { mode: 'dark' },
+                    legend: { show: true, position: 'top', horizontalAlign: 'right' },
+                    tooltip: { theme: 'dark' }
+                };
+
+                const chart = new ApexCharts(document.querySelector("#latency-chart"), options);
+                chart.render();
+            })
+            .catch(err => console.error("Error loading latency stats:", err));
+    })();
+</script>

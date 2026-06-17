@@ -243,6 +243,10 @@
                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.25 14.25h13.5m-13.5 0a3 3 0 0 1-3-3m3 3a3 3 0 1 0 0 6h13.5a3 3 0 1 0 0-6m-16.5-3a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3m-19.5 0a4.5 4.5 0 0 1 .9-2.7L5.737 5.1a3.375 3.375 0 0 1 2.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 0 1 .9 2.7m0 0a3 3 0 0 1-3 3m0 3h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Zm-3 6h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Z"></path></svg>
                 System
             </button>
+            <button onclick="switchTab('topology')" id="tab-topology" class="text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+                Topology
+            </button>
         </div>
 
         <div id="view-errors" class="space-y-8 animate-fade-in">
@@ -343,6 +347,15 @@
             </div>
         </div>
 
+        <!-- Topology View -->
+        <div id="view-topology" class="hidden">
+            <div hx-get="/api/topology/view" hx-trigger="loadTopology from:body">
+                <div class="flex justify-center py-12">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-500"></div>
+                </div>
+            </div>
+        </div>
+
         <div id="view-system" class="hidden space-y-6">
             <!-- System metrics will be loaded via JS -->
             <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="system-metrics-grid">
@@ -386,6 +399,50 @@
 
                 <!-- Existing rules -->
                 <div id="grouping-rules-list" class="space-y-2">
+                    <!-- Loaded via JS -->
+                </div>
+            </div>
+
+            <!-- Alerting Rules -->
+            <div class="glass-card rounded-2xl p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                        <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" /></svg>
+                        Smart Alerting Rules
+                    </h2>
+                </div>
+                <p class="text-xs text-gray-500 mb-4">Set conditional rules for when to trigger webhook alerts (e.g., notify only if an error happens 10 times in 5 minutes).</p>
+                
+                <!-- Add rule form -->
+                <form hx-post="/api/alerting-rules" hx-swap="none" class="flex flex-col gap-3 mb-4">
+                    <div class="flex gap-2">
+                        <select name="project_id" class="w-32 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                            <option value="1">Project 1</option>
+                            <!-- Hardcoded for now since UI doesn't expose easy dynamic select here, ideally populated via JS. Let's make it a text input for project_id to be safe since users might have many projects. -->
+                        </select>
+                        <input type="text" name="project_id" placeholder="Proj ID" required class="w-20 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500" title="Project ID">
+                        <input type="text" name="environment" placeholder="Env (optional)" class="w-28 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                        <div class="flex items-center gap-1 text-xs text-gray-400">
+                            Count > <input type="number" name="min_count" value="10" min="1" class="w-16 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                        </div>
+                        <div class="flex items-center gap-1 text-xs text-gray-400">
+                            in <input type="number" name="time_window_minutes" value="5" min="0" class="w-16 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500"> mins
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                        <input type="text" name="target_discord" placeholder="Discord Webhook URL" class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                        <input type="text" name="target_telegram_token" placeholder="TG Bot Token" class="w-32 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                        <input type="text" name="target_telegram_chat_id" placeholder="TG Chat ID" class="w-32 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                        <button type="submit" class="px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold rounded-lg transition-colors">Add Rule</button>
+                    </div>
+                </form>
+
+                <div class="flex gap-2 mb-3">
+                    <input type="text" id="alert-rule-project-filter" placeholder="Filter by Project ID (e.g. 1)" value="1" class="w-48 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300 focus:outline-none focus:ring-1 focus:ring-brand-500" onchange="loadAlertingRules()">
+                </div>
+
+                <!-- Existing rules -->
+                <div id="alerting-rules-list" class="space-y-2">
                     <!-- Loaded via JS -->
                 </div>
             </div>
@@ -522,10 +579,12 @@
         }
 
         function switchTab(tab) {
-            const views = ['errors', 'performance', 'system'];
+            const views = ['errors', 'performance', 'system', 'topology'];
             views.forEach(v => {
                 const view = document.getElementById('view-' + v);
                 const tabBtn = document.getElementById('tab-' + v);
+                if (!view || !tabBtn) return;
+                
                 if (v === tab) {
                     view.classList.remove('hidden');
                     tabBtn.className = "text-brand-400 font-semibold px-1 py-3 border-b-2 border-brand-400 transition-colors text-sm flex items-center gap-2";
@@ -538,9 +597,13 @@
             if (tab === 'performance') {
                 document.body.dispatchEvent(new Event('loadPerformance'));
             }
+            if (tab === 'topology') {
+                document.body.dispatchEvent(new Event('loadTopology'));
+            }
             if (tab === 'system') {
                 loadSystemMetrics();
                 loadGroupingRules();
+                loadAlertingRules();
             }
         }
 
@@ -589,6 +652,37 @@
                     htmx.process(list);
                 })
                 .catch(err => console.error('Failed to load grouping rules:', err));
+        }
+
+        function loadAlertingRules() {
+            const projectID = document.getElementById('alert-rule-project-filter').value || '1';
+            fetch('/api/alerting-rules?project_id=' + projectID)
+                .then(r => r.json())
+                .then(rules => {
+                    const list = document.getElementById('alerting-rules-list');
+                    if (!rules || rules.length === 0) {
+                        list.innerHTML = '<p class="text-xs text-gray-600 text-center py-4">No alerting rules for this project.</p>';
+                        return;
+                    }
+                    list.innerHTML = rules.map(r => `
+                        <div class="flex items-center justify-between bg-gray-800/50 border border-gray-700/50 rounded-lg px-4 py-2.5">
+                            <div class="flex items-center gap-3 min-w-0">
+                                <span class="text-xs text-gray-300 font-semibold">Proj: ${r.project_id}</span>
+                                ${r.environment ? `<span class="px-2 py-0.5 rounded text-[10px] font-medium bg-brand-900/50 text-brand-400 border border-brand-800/50">${r.environment}</span>` : ''}
+                                <span class="text-xs text-gray-400">Trigger if count &gt; <strong class="text-emerald-400">${r.min_count}</strong> in <strong class="text-amber-400">${r.time_window_minutes}m</strong></span>
+                                <div class="flex gap-1 ml-2">
+                                    ${r.target_discord ? `<span class="px-1.5 py-0.5 rounded text-[10px] bg-indigo-900/30 text-indigo-400 border border-indigo-800/50">Discord</span>` : ''}
+                                    ${r.target_telegram_token ? `<span class="px-1.5 py-0.5 rounded text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800/50">Telegram</span>` : ''}
+                                </div>
+                            </div>
+                            <button hx-post="/api/alerting-rules/delete/${r.id}" hx-swap="none" class="text-gray-600 hover:text-red-400 transition-colors p-1">
+                                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </button>
+                        </div>
+                    `).join('');
+                    htmx.process(list);
+                })
+                .catch(err => console.error('Failed to load alerting rules:', err));
         }
 
         function closeProjectModal() {

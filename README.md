@@ -225,8 +225,8 @@ go build -o pocketsentry .
 ### 🗺️ Roadmap
 
 **🔥 The v3.0 Vision: Zero-Config eBPF APM**
-- [ ] **Linux eBPF Agent**: Catch 500 Internal Server Errors, database latency, and timeouts directly from the Linux kernel *without any code changes or SDKs*.
-- [ ] **Network Topology Map**: Visual dashboard showing how your Docker containers/services interact and where the bottlenecks are.
+- [x] **Linux eBPF Agent**: Catch 500 Internal Server Errors, database latency, and timeouts directly from the Linux kernel *without any code changes or SDKs*.
+- [x] **Network Topology Map**: Visual dashboard showing how your Docker containers/services interact and where the bottlenecks are.
 *(Will be optional via `--enable-ebpf` flag. PocketSentry remains a lightweight single binary!)*
 
 **General Roadmap:**
@@ -469,8 +469,8 @@ go build -o pocketsentry .
 ### 🗺️ Дорожная карта
 
 **🔥 Главная цель v3.0: Zero-Config eBPF APM**
-- [ ] **eBPF Агент (Linux)**: Перехват 500-х HTTP ошибок, зависаний БД и сетевых таймаутов прямо из ядра Linux *без единой строчки кода и без установки SDK*.
-- [ ] **Карта сети (Topology)**: Визуальный дашборд взаимодействия ваших Docker-контейнеров с подсветкой узких мест.
+- [x] **eBPF Агент (Linux)**: Перехват 500-х HTTP ошибок, зависаний БД и сетевых таймаутов прямо из ядра Linux *без единой строчки кода и без установки SDK*.
+- [x] **Карта сети (Topology)**: Визуальный дашборд взаимодействия ваших Docker-контейнеров с подсветкой узких мест.
 *(Будет опциональным модулем через флаг `--enable-ebpf`. PocketSentry останется единым лёгким бинарником!)*
 
 **Ближайшие планы:**

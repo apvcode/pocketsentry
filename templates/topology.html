@@ -1,0 +1,90 @@
+<div class="space-y-6 animate-fade-in pb-12">
+    <div class="flex items-center justify-between">
+        <div>
+            <h2 class="text-xl font-bold text-white">Network Topology Map <span class="text-xs bg-brand-500/20 text-brand-400 px-2 py-1 ml-2 rounded font-mono">eBPF</span></h2>
+            <p class="text-sm text-gray-400 mt-1">Real-time interaction graph built automatically from the Linux kernel.</p>
+        </div>
+        <button onclick="document.body.dispatchEvent(new Event('loadTopology'))" class="text-sm bg-gray-800 hover:bg-gray-700 text-white px-3 py-1.5 rounded transition-colors flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            Refresh
+        </button>
+    </div>
+
+    <div class="glass-card rounded-2xl border border-gray-700/50 shadow-xl overflow-hidden relative" style="height: 600px;">
+        <div id="topology-graph" class="w-full h-full bg-gray-900/50"></div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<script>
+    (function() {
+        fetch('/api/topology')
+            .then(res => res.json())
+            .then(edgesData => {
+                if (!edgesData || edgesData.length === 0) {
+                    document.getElementById('topology-graph').innerHTML = '<div class="flex items-center justify-center h-full text-gray-500">No network data captured yet. Ensure eBPF is enabled.</div>';
+                    return;
+                }
+
+                // Transform edgesData to vis-network format
+                const nodesMap = new Map();
+                const visEdges = [];
+
+                edgesData.forEach(e => {
+                    if (!nodesMap.has(e.source)) {
+                        nodesMap.set(e.source, { id: e.source, label: e.source, group: 'process' });
+                    }
+                    const targetId = `${e.target}:${e.port}`;
+                    if (!nodesMap.has(targetId)) {
+                        nodesMap.set(targetId, { id: targetId, label: targetId, group: 'external' });
+                    }
+
+                    visEdges.push({
+                        from: e.source,
+                        to: targetId,
+                        value: e.count, // thickness
+                        title: `${e.count} connections`,
+                        arrows: 'to',
+                        color: { color: '#3b82f6', opacity: 0.6 }
+                    });
+                });
+
+                const visNodes = Array.from(nodesMap.values());
+
+                const container = document.getElementById('topology-graph');
+                const data = {
+                    nodes: new vis.DataSet(visNodes),
+                    edges: new vis.DataSet(visEdges)
+                };
+                
+                const options = {
+                    nodes: {
+                        shape: 'dot',
+                        size: 16,
+                        font: { color: '#9ca3af', face: 'Inter' },
+                        borderWidth: 2,
+                    },
+                    edges: {
+                        smooth: { type: 'continuous' }
+                    },
+                    groups: {
+                        process: { color: { background: '#10b981', border: '#059669' } },
+                        external: { color: { background: '#f59e0b', border: '#d97706' } }
+                    },
+                    physics: {
+                        forceAtlas2Based: { gravitationalConstant: -50, centralGravity: 0.01, springLength: 100, springConstant: 0.08 },
+                        maxVelocity: 50,
+                        solver: 'forceAtlas2Based',
+                        timestep: 0.35,
+                        stabilization: { iterations: 150 }
+                    }
+                };
+
+                new vis.Network(container, data, options);
+            })
+            .catch(err => {
+                console.error("Topology Error:", err);
+                document.getElementById('topology-graph').innerHTML = '<div class="flex items-center justify-center h-full text-red-500">Failed to load topology graph</div>';
+            });
+    })();
+</script>
