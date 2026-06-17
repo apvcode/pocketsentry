@@ -224,13 +224,16 @@ go build -o pocketsentry .
 
 ### 🗺️ Roadmap
 
-- [ ] **Smart Grouping**: Custom regex-based rules to merge similar events (e.g. stripping dynamic IDs or hashes from messages).
-- [ ] **System & DB Metrics**: Dashboard charts for SQLite database size, error ingestion rates (RPS), and retention cleanup stats.
-- [ ] **Attachments Support**: Store and display screenshots, logs, and other files uploaded via the Sentry SDK.
+- [ ] **Smart Alerting Rules**: Conditional routing for webhooks (e.g., notify only if an error occurs > 10 times in 5 minutes, or limit alerts to specific environments like `production`).
+- [ ] **Source Maps API Upload**: Dedicated API endpoint to upload `.map` files directly from CI/CD pipelines (e.g., during GitHub Actions builds).
+- [ ] **Latency Analytics**: Interactive dashboard graphs showing transaction percentile metrics (p50, p90, p99) over time.
 
 <details>
 <summary><strong>✅ Completed Features</strong></summary>
 
+- [x] **Smart Grouping**: Custom regex-based rules to merge similar events (e.g. stripping dynamic IDs or hashes from messages).
+- [x] **System & DB Metrics**: Dashboard charts for SQLite database size, error ingestion rates (RPS), and retention cleanup stats.
+- [x] **Attachments Support**: Store and display screenshots, logs, and other files uploaded via the Sentry SDK.
 - [x] Event detail page with full stacktrace
 - [x] Retention policies (auto-delete old events)
 - [x] Authentication
@@ -458,13 +461,16 @@ go build -o pocketsentry .
 
 ### 🗺️ Дорожная карта
 
-- [ ] **Умное группирование**: Пользовательские правила на основе регулярных выражений для объединения похожих ошибок (например, вырезание динамических ID или хешей из сообщений).
-- [ ] **Здоровье системы и БД**: Графики размера базы SQLite, объема входящих запросов (RPS) и детальной статистики очистки устаревших данных.
-- [ ] **Поддержка вложений**: Сохранение и отображение скриншотов, логов и файлов, отправленных клиентом через Sentry SDK.
+- [ ] **Умные правила уведомлений**: Настройка условий отправки алертов (например, отправлять уведомление только если ошибка произошла более 10 раз за 5 минут, или фильтровать по окружениям).
+- [ ] **Загрузка Source Maps через API**: API-эндпоинт для автоматической отправки `.map` файлов напрямую из CI/CD пайплайнов во время сборки.
+- [ ] **Аналитика задержек (Latency)**: Графики перцентилей (p50, p90, p99) для отслеживания деградации скорости ответа транзакций на дашборде.
 
 <details>
 <summary><strong>✅ Выполненные задачи</strong></summary>
 
+- [x] **Умное группирование**: Пользовательские правила на основе регулярных выражений для объединения похожих ошибок (например, вырезание динамических ID или хешей из сообщений).
+- [x] **Здоровье системы и БД**: Графики размера базы SQLite, объема входящих запросов (RPS) и детальной статистики очистки устаревших данных.
+- [x] **Поддержка вложений**: Сохранение и отображение скриншотов, логов и файлов, отправленных клиентом через Sentry SDK.
 - [x] Страница детального просмотра ошибки со стектрейсом
 - [x] Политика хранения (авто-удаление старых событий)
 - [x] Аутентификация
