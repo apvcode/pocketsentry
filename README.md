@@ -230,13 +230,14 @@ go build -o pocketsentry .
 *(Will be optional via `--enable-ebpf` flag. PocketSentry remains a lightweight single binary!)*
 
 **General Roadmap:**
-- [ ] **Smart Alerting Rules**: Conditional routing for webhooks (e.g., notify only if an error occurs > 10 times in 5 minutes, or limit alerts to specific environments like `production`).
-- [ ] **Source Maps API Upload**: Dedicated API endpoint to upload `.map` files directly from CI/CD pipelines (e.g., during GitHub Actions builds).
-- [ ] **Latency Analytics**: Interactive dashboard graphs showing transaction percentile metrics (p50, p90, p99) over time.
+- [ ] *All immediate app-level features are completed! Focus shifting to eBPF APM.*
 
 <details>
 <summary><strong>✅ Completed Features</strong></summary>
 
+- [x] **Smart Alerting Rules**: Conditional routing for webhooks (e.g., notify only if an error occurs > 10 times in 5 minutes).
+- [x] **Source Maps API Upload**: Dedicated API endpoint to upload `.map` files directly from CI/CD pipelines.
+- [x] **Latency Analytics**: Interactive dashboard graphs showing transaction percentile metrics (p50, p90, p99).
 - [x] **Smart Grouping**: Custom regex-based rules to merge similar events (e.g. stripping dynamic IDs or hashes from messages).
 - [x] **System & DB Metrics**: Dashboard charts for SQLite database size, error ingestion rates (RPS), and retention cleanup stats.
 - [x] **Attachments Support**: Store and display screenshots, logs, and other files uploaded via the Sentry SDK.
@@ -473,14 +474,15 @@ go build -o pocketsentry .
 *(Будет опциональным модулем через флаг `--enable-ebpf`. PocketSentry останется единым лёгким бинарником!)*
 
 **Ближайшие планы:**
-- [ ] **Умные правила уведомлений**: Настройка условий отправки алертов (например, отправлять уведомление только если ошибка произошла более 10 раз за 5 минут, или фильтровать по окружениям).
-- [ ] **Загрузка Source Maps через API**: API-эндпоинт для автоматической отправки `.map` файлов напрямую из CI/CD пайплайнов во время сборки.
-- [ ] **Аналитика задержек (Latency)**: Графики перцентилей (p50, p90, p99) для отслеживания деградации скорости ответа транзакций на дашборде.
+- [ ] *Все прикладные задачи завершены! Переходим к интеграции eBPF.*
 
 <details>
 <summary><strong>✅ Выполненные задачи</strong></summary>
 
-- [x] **Умное группирование**: Пользовательские правила на основе регулярных выражений для объединения похожих ошибок (например, вырезание динамических ID или хешей из сообщений).
+- [x] **Умные правила уведомлений**: Настройка условий отправки алертов (например, отправлять уведомление только если ошибка произошла более 10 раз за 5 минут).
+- [x] **Загрузка Source Maps через API**: API-эндпоинт для автоматической отправки `.map` файлов напрямую из CI/CD пайплайнов.
+- [x] **Аналитика задержек (Latency)**: Графики перцентилей (p50, p90, p99) для отслеживания деградации скорости ответа транзакций на дашборде.
+- [x] **Умное группирование**: Пользовательские правила на основе регулярных выражений для объединения похожих ошибок.
 - [x] **Здоровье системы и БД**: Графики размера базы SQLite, объема входящих запросов (RPS) и детальной статистики очистки устаревших данных.
 - [x] **Поддержка вложений**: Сохранение и отображение скриншотов, логов и файлов, отправленных клиентом через Sentry SDK.
 - [x] Страница детального просмотра ошибки со стектрейсом
