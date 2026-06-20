@@ -247,6 +247,10 @@
                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
                 Topology
             </button>
+            <button onclick="switchTab('logs')" id="tab-logs" class="text-gray-500 hover:text-gray-300 font-medium px-1 py-3 border-b-2 border-transparent transition-colors text-sm flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" /></svg>
+                Logs
+            </button>
         </div>
 
         <div id="view-errors" class="space-y-8 animate-fade-in">
@@ -350,6 +354,15 @@
         <!-- Topology View -->
         <div id="view-topology" class="hidden">
             <div hx-get="/api/topology/view" hx-trigger="loadTopology from:body">
+                <div class="flex justify-center py-12">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-500"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs View -->
+        <div id="view-logs" class="hidden">
+            <div hx-get="/api/logs/view" hx-trigger="loadLogs from:body">
                 <div class="flex justify-center py-12">
                     <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-500"></div>
                 </div>
@@ -579,7 +592,7 @@
         }
 
         function switchTab(tab) {
-            const views = ['errors', 'performance', 'system', 'topology'];
+            const views = ['errors', 'performance', 'system', 'topology', 'logs'];
             views.forEach(v => {
                 const view = document.getElementById('view-' + v);
                 const tabBtn = document.getElementById('tab-' + v);
@@ -599,6 +612,9 @@
             }
             if (tab === 'topology') {
                 document.body.dispatchEvent(new Event('loadTopology'));
+            }
+            if (tab === 'logs') {
+                document.body.dispatchEvent(new Event('loadLogs'));
             }
             if (tab === 'system') {
                 loadSystemMetrics();
@@ -623,6 +639,9 @@
                     document.getElementById('metric-mem').textContent = m.mem_alloc_mb + ' MB';
                     document.getElementById('metric-goroutines').textContent = m.goroutines;
                     document.getElementById('metric-go-version').textContent = m.go_version;
+                    if (document.getElementById('metric-total-logs')) {
+                        document.getElementById('metric-total-logs').textContent = m.total_logs;
+                    }
                 })
                 .catch(err => console.error('Failed to load system metrics:', err));
         }

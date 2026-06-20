@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"net"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -36,7 +37,7 @@ import (
 )
 
 // currentVersion is the version of this binary, compared against GitHub releases.
-const currentVersion = "v3.0.0"
+const currentVersion = "v3.1.0"
 
 // templateFS embeds the templates directory into the binary so the final
 // executable is fully self-contained — no external files needed.
@@ -207,6 +208,19 @@ func initDB(path string) error {
 			last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(source_node, target_node, target_port)
 		);
+
+		CREATE TABLE IF NOT EXISTS app_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id TEXT NOT NULL DEFAULT '1',
+			source TEXT NOT NULL DEFAULT '',
+			level TEXT NOT NULL DEFAULT 'info',
+			message TEXT NOT NULL,
+			metadata TEXT NOT NULL DEFAULT '{}',
+			timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_app_logs_project ON app_logs(project_id);
+		CREATE INDEX IF NOT EXISTS idx_app_logs_timestamp ON app_logs(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_app_logs_level ON app_logs(level);
 	`)
 	if err != nil {
 		return fmt.Errorf("create performance tables: %w", err)
@@ -354,6 +368,7 @@ type SystemMetrics struct {
 	GoVersion        string  `json:"go_version"`
 	GoRoutines       int     `json:"goroutines"`
 	MemAllocMB       float64 `json:"mem_alloc_mb"`
+	TotalLogs        int     `json:"total_logs"`
 }
 
 func querySystemMetrics() SystemMetrics {
@@ -387,6 +402,7 @@ func querySystemMetrics() SystemMetrics {
 	_ = db.QueryRow("SELECT COUNT(*) FROM projects").Scan(&m.TotalProjects)
 	_ = db.QueryRow("SELECT COUNT(*) FROM transactions").Scan(&m.TotalTransactions)
 	_ = db.QueryRow("SELECT COUNT(*) FROM attachments").Scan(&m.TotalAttachments)
+	_ = db.QueryRow("SELECT COUNT(*) FROM app_logs").Scan(&m.TotalLogs)
 	_ = db.QueryRow("SELECT COUNT(*) FROM grouping_rules WHERE enabled = 1").Scan(&m.GroupingRules)
 
 	// Events per minute (based on atomic counter)
@@ -910,6 +926,8 @@ type EventDetail struct {
 	HasAttachments bool
 	HasLibraryFrames bool
 	RawJSON     string
+	ReplayID    string
+	HasReplay   bool
 }
 
 // queryEventByID fetches a single event from the database.
@@ -952,28 +970,46 @@ func queryEventByID(id string) (*EventDetail, error) {
 	}
 
 	// Parse metadata from raw payload.
-	var raw rawPayloadDetail
-	if json.Unmarshal([]byte(rawPayload), &raw) == nil {
-		ev.ServerName = raw.ServerName
-		ev.Environment = raw.Environment
-		ev.Release = raw.Release
-
-		if raw.User != nil {
-			ev.IP = raw.User.IP
-		}
-		if raw.Request != nil {
-			ev.URL = raw.Request.URL
-		}
-		if raw.SDK != nil {
-			ev.SDKName = raw.SDK.Name + " " + raw.SDK.Version
-		}
-		if raw.Tags != nil && len(raw.Tags) > 0 {
-			ev.Tags = raw.Tags
+	var detail rawPayloadDetail
+	if json.Unmarshal([]byte(rawPayload), &detail) == nil {
+		ev.OS = extractContextField(detail.Contexts, "os", "name", "version")
+		ev.Browser = extractContextField(detail.Contexts, "browser", "name", "version")
+		ev.Runtime = extractContextField(detail.Contexts, "runtime", "name", "version")
+		ev.ServerName = detail.ServerName
+		ev.Environment = detail.Environment
+		ev.Release = detail.Release
+		ev.Tags = detail.Tags
+		if len(ev.Tags) > 0 {
 			ev.HasTags = true
 		}
 
+		// Extract ReplayID
+		if replayId, ok := ev.Tags["replayId"]; ok && replayId != "" {
+			ev.ReplayID = replayId
+		} else {
+			var replayCtx struct {
+				ReplayID string `json:"replay_id"`
+			}
+			if b, ok := detail.Contexts["replay"]; ok {
+				if err := json.Unmarshal(b, &replayCtx); err == nil {
+					ev.ReplayID = replayCtx.ReplayID
+				}
+			}
+		}
+		ev.HasReplay = ev.ReplayID != ""
+
+		if detail.User != nil {
+			ev.IP = detail.User.IP
+		}
+		if detail.Request != nil {
+			ev.URL = detail.Request.URL
+		}
+		if detail.SDK != nil {
+			ev.SDKName = detail.SDK.Name + " " + detail.SDK.Version
+		}
+
 		// Extract Breadcrumbs
-		if len(raw.Breadcrumbs) > 0 {
+		if len(detail.Breadcrumbs) > 0 {
 			var bcArray []struct {
 				Type      string                 `json:"type"`
 				Category  string                 `json:"category"`
@@ -984,7 +1020,7 @@ func queryEventByID(id string) (*EventDetail, error) {
 			}
 
 			// Try to parse as array first
-			if err := json.Unmarshal(raw.Breadcrumbs, &bcArray); err != nil {
+			if err := json.Unmarshal(detail.Breadcrumbs, &bcArray); err != nil {
 				// Fallback to object format { "values": [...] }
 				var bcObj struct {
 					Values []struct {
@@ -996,7 +1032,7 @@ func queryEventByID(id string) (*EventDetail, error) {
 						Data      map[string]interface{} `json:"data"`
 					} `json:"values"`
 				}
-				if json.Unmarshal(raw.Breadcrumbs, &bcObj) == nil {
+				if json.Unmarshal(detail.Breadcrumbs, &bcObj) == nil {
 					bcArray = bcObj.Values
 				}
 			}
@@ -1020,16 +1056,9 @@ func queryEventByID(id string) (*EventDetail, error) {
 			}
 		}
 
-		// Extract OS / Browser / Runtime from contexts.
-		if raw.Contexts != nil {
-			ev.OS = extractContextField(raw.Contexts, "os", "name", "version")
-			ev.Browser = extractContextField(raw.Contexts, "browser", "name", "version")
-			ev.Runtime = extractContextField(raw.Contexts, "runtime", "name", "version")
-		}
-
 		// Extract exception type/value and stack frames.
-		if raw.Exception != nil && len(raw.Exception.Values) > 0 {
-			exc := raw.Exception.Values[0]
+		if detail.Exception != nil && len(detail.Exception.Values) > 0 {
+			exc := detail.Exception.Values[0]
 			ev.ExcType = exc.Type
 			ev.ExcValue = exc.Value
 			if exc.Stacktrace != nil && len(exc.Stacktrace.Frames) > 0 {
@@ -1827,8 +1856,9 @@ func envelopeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Process attachments from envelope
+	// Process attachments and replays from envelope
 	extractAndSaveAttachments(body, eventID)
+	extractAndSaveReplays(body, eventID)
 
 	respondWithID(w, eventID)
 }
@@ -1859,6 +1889,39 @@ func extractAndSaveAttachments(envelopeData []byte, eventID string) {
 			}
 			if err := saveAttachment(eventID, fn, ct, lines[i+1]); err != nil {
 				log.Printf("[envelope] save attachment error: %v", err)
+			}
+		}
+	}
+}
+
+// extractAndSaveReplays scans an envelope for replay items and saves them.
+func extractAndSaveReplays(envelopeData []byte, eventID string) {
+	lines := splitEnvelopeLines(envelopeData)
+	for i := 1; i+1 < len(lines); i += 2 {
+		var itemHeader struct {
+			Type     string `json:"type"`
+			ReplayID string `json:"replay_id"`
+		}
+		if err := json.Unmarshal(lines[i], &itemHeader); err != nil {
+			continue
+		}
+		t := strings.ToLower(itemHeader.Type)
+		if t == "replay_event" || t == "replay_recording" {
+			replayID := itemHeader.ReplayID
+			if replayID == "" {
+				replayID = eventID
+			}
+			if replayID == "" {
+				continue
+			}
+			os.MkdirAll(filepath.Join("data", "replays"), 0755)
+			filePath := filepath.Join("data", "replays", replayID+".jsonl")
+			f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				f.Write(lines[i+1])
+				f.Write([]byte("\n"))
+				f.Close()
+				log.Printf("[replay] saved chunk for replay %s", replayID)
 			}
 		}
 	}
@@ -2288,7 +2351,51 @@ func groupingRulesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveProcessName attempts to find the command line name for a given PID.
+// ---------- Docker / K8s Container Resolution ----------
+
+// containerNameCache caches PID→container name and IP→container name lookups.
+var containerNameCache sync.Map // key: string (pid:N or ip:X.X.X.X) → value: string
+
+// resolveProcessName resolves a PID to a human-readable name.
+// Priority: Docker container name → K8s pod name → process binary name → PID:N.
 func resolveProcessName(pid uint32) string {
+	cacheKey := fmt.Sprintf("pid:%d", pid)
+	if v, ok := containerNameCache.Load(cacheKey); ok {
+		return v.(string)
+	}
+
+	name := resolveProcessNameUncached(pid)
+	containerNameCache.Store(cacheKey, name)
+	return name
+}
+
+func resolveProcessNameUncached(pid uint32) string {
+	// 1. Try to detect Docker/K8s via /proc/{pid}/cgroup
+	cgroupPath := fmt.Sprintf("/proc/%d/cgroup", pid)
+	cgData, err := os.ReadFile(cgroupPath)
+	if err == nil {
+		containerID, podUID := parseCgroupForContainer(string(cgData))
+		if containerID != "" {
+			// Try Docker API to resolve container name
+			if name := queryDockerContainerName(containerID); name != "" {
+				if podUID != "" {
+					return fmt.Sprintf("🐳 %s (pod:%s)", name, podUID[:8])
+				}
+				return "🐳 " + name
+			}
+			// Fallback: short container ID
+			short := containerID
+			if len(short) > 12 {
+				short = short[:12]
+			}
+			if podUID != "" {
+				return fmt.Sprintf("☸ pod:%s/%s", podUID[:8], short)
+			}
+			return "🐳 " + short
+		}
+	}
+
+	// 2. Fallback to process cmdline
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		return fmt.Sprintf("PID:%d", pid)
@@ -2298,6 +2405,156 @@ func resolveProcessName(pid uint32) string {
 		return filepath.Base(string(parts[0]))
 	}
 	return fmt.Sprintf("PID:%d", pid)
+}
+
+// resolveIPToContainer tries to resolve a destination IP to a Docker container name.
+func resolveIPToContainer(ip string) string {
+	cacheKey := "ip:" + ip
+	if v, ok := containerNameCache.Load(cacheKey); ok {
+		return v.(string)
+	}
+
+	name := queryDockerContainerByIP(ip)
+	if name == "" {
+		name = ip // fallback to raw IP
+	} else {
+		name = "🐳 " + name
+	}
+	containerNameCache.Store(cacheKey, name)
+	return name
+}
+
+// parseCgroupForContainer extracts Docker container ID and K8s pod UID from cgroup data.
+func parseCgroupForContainer(cgroupData string) (containerID, podUID string) {
+	for _, line := range strings.Split(cgroupData, "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		path := parts[2]
+
+		// Docker: .../docker/<container_id> or .../containerd/<container_id>
+		for _, prefix := range []string{"/docker/", "/containerd/", "/cri-containerd-"} {
+			if idx := strings.LastIndex(path, prefix); idx != -1 {
+				id := path[idx+len(prefix):]
+				id = strings.TrimSuffix(id, ".scope")
+				if len(id) >= 12 {
+					containerID = id
+				}
+			}
+		}
+
+		// K8s: .../kubepods/.../pod<uid>/...
+		if strings.Contains(path, "kubepods") {
+			re := regexp.MustCompile(`pod([0-9a-f-]{36})`)
+			if m := re.FindStringSubmatch(path); len(m) > 1 {
+				podUID = m[1]
+			}
+		}
+	}
+	return
+}
+
+// queryDockerContainerName calls the Docker Engine API via Unix socket to get a container's name.
+func queryDockerContainerName(containerID string) string {
+	// Trim to first 12 chars if needed (Docker accepts prefix)
+	short := containerID
+	if len(short) > 12 {
+		short = short[:12]
+	}
+
+	conn, err := net.Dial("unix", "/var/run/docker.sock")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	req := fmt.Sprintf("GET /containers/%s/json HTTP/1.0\r\nHost: localhost\r\n\r\n", short)
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	_, err = conn.Write([]byte(req))
+	if err != nil {
+		return ""
+	}
+
+	body, err := io.ReadAll(conn)
+	if err != nil {
+		return ""
+	}
+
+	// Skip HTTP headers
+	headerEnd := bytes.Index(body, []byte("\r\n\r\n"))
+	if headerEnd == -1 {
+		return ""
+	}
+	jsonBody := body[headerEnd+4:]
+
+	var info struct {
+		Name string `json:"Name"`
+	}
+	if err := json.Unmarshal(jsonBody, &info); err != nil {
+		return ""
+	}
+
+	return strings.TrimPrefix(info.Name, "/")
+}
+
+// queryDockerContainerByIP inspects Docker networks to find a container by IP.
+func queryDockerContainerByIP(ip string) string {
+	conn, err := net.Dial("unix", "/var/run/docker.sock")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	req := "GET /containers/json HTTP/1.0\r\nHost: localhost\r\n\r\n"
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_, err = conn.Write([]byte(req))
+	if err != nil {
+		return ""
+	}
+
+	body, err := io.ReadAll(conn)
+	if err != nil {
+		return ""
+	}
+
+	headerEnd := bytes.Index(body, []byte("\r\n\r\n"))
+	if headerEnd == -1 {
+		return ""
+	}
+	jsonBody := body[headerEnd+4:]
+
+	var containers []struct {
+		Names           []string `json:"Names"`
+		NetworkSettings struct {
+			Networks map[string]struct {
+				IPAddress string `json:"IPAddress"`
+			} `json:"Networks"`
+		} `json:"NetworkSettings"`
+	}
+	if err := json.Unmarshal(jsonBody, &containers); err != nil {
+		return ""
+	}
+
+	for _, c := range containers {
+		for _, n := range c.NetworkSettings.Networks {
+			if n.IPAddress == ip && len(c.Names) > 0 {
+				return strings.TrimPrefix(c.Names[0], "/")
+			}
+		}
+	}
+	return ""
+}
+
+// flushContainerCache periodically clears the container name cache so stale entries are refreshed.
+func flushContainerCache() {
+	for {
+		time.Sleep(60 * time.Second)
+		containerNameCache.Range(func(key, value any) bool {
+			containerNameCache.Delete(key)
+			return true
+		})
+	}
 }
 
 // topologyHandler returns nodes and edges for the network map.
@@ -2344,6 +2601,205 @@ func topologyViewHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	_ = tmpl.Execute(w, nil)
+}
+
+// ---------- Log Aggregation ----------
+
+// LogEntry represents a single log line for ingestion.
+type LogEntry struct {
+	ProjectID string            `json:"project_id"`
+	Source    string            `json:"source"`
+	Level    string            `json:"level"`
+	Message  string            `json:"message"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+	Timestamp string           `json:"timestamp,omitempty"`
+}
+
+// LogRow represents a single log line from the DB.
+type LogRow struct {
+	ID        int    `json:"id"`
+	ProjectID string `json:"project_id"`
+	Source    string `json:"source"`
+	Level    string `json:"level"`
+	Message  string `json:"message"`
+	Metadata string `json:"metadata"`
+	Timestamp string `json:"timestamp"`
+}
+
+// logsIngestHandler handles POST /api/logs for ingesting log entries.
+func logsIngestHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Limit request size to 2 MB to prevent memory exhaustion
+	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body or body too large", http.StatusBadRequest)
+		return
+	}
+
+	// Accept both single entry and array
+	var entries []LogEntry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		var single LogEntry
+		if err := json.Unmarshal(body, &single); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		entries = []LogEntry{single}
+	}
+
+	count := 0
+	for _, entry := range entries {
+		// Basic validation: skip empty messages or ridiculously long messages
+		if entry.Message == "" || len(entry.Message) > 8192 {
+			continue
+		}
+		if len(entry.Source) > 256 || len(entry.Level) > 64 || len(entry.ProjectID) > 64 {
+			continue
+		}
+
+		if entry.ProjectID == "" {
+			entry.ProjectID = "1"
+		}
+		if entry.Level == "" {
+			entry.Level = "info"
+		}
+		if entry.Source == "" {
+			entry.Source = "app"
+		}
+
+		metaJSON := "{}"
+		if entry.Metadata != nil {
+			// Limit metadata to prevent DB bloat
+			if len(entry.Metadata) > 100 {
+				continue
+			}
+			tooLarge := false
+			for k, v := range entry.Metadata {
+				if len(k) > 128 || len(v) > 1024 {
+					tooLarge = true
+					break
+				}
+			}
+			if tooLarge {
+				continue
+			}
+
+			if b, err := json.Marshal(entry.Metadata); err == nil {
+				metaJSON = string(b)
+			}
+		}
+
+		ts := time.Now().UTC().Format(time.RFC3339)
+		if entry.Timestamp != "" {
+			// Basic sanitization/validation of timestamp format (RFC3339-like strings)
+			if len(entry.Timestamp) < 32 {
+				ts = entry.Timestamp
+			}
+		}
+
+		_, err := db.Exec(
+			`INSERT INTO app_logs (project_id, source, level, message, metadata, timestamp)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			entry.ProjectID, entry.Source, entry.Level, entry.Message, metaJSON, ts,
+		)
+		if err != nil {
+			log.Printf("[logs] insert error: %v", err)
+			continue
+		}
+		count++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ok",
+		"ingested": count,
+	})
+}
+
+// logsQueryHandler handles GET /api/logs for querying log entries.
+func logsQueryHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	search := r.URL.Query().Get("search")
+	level := r.URL.Query().Get("level")
+	project := r.URL.Query().Get("project")
+	source := r.URL.Query().Get("source")
+	limitStr := r.URL.Query().Get("limit")
+	limit := 200
+	if limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 && n <= 2000 {
+			limit = n
+		}
+	}
+
+	q := `SELECT id, project_id, source, level, message, metadata, timestamp
+	      FROM app_logs WHERE 1=1`
+	var args []interface{}
+
+	if level != "" && level != "All" {
+		q += " AND level = ?"
+		args = append(args, level)
+	}
+	if project != "" && project != "All" {
+		q += " AND project_id = ?"
+		args = append(args, project)
+	}
+	if source != "" {
+		q += " AND source = ?"
+		args = append(args, source)
+	}
+	if search != "" {
+		q += " AND message LIKE '%' || ? || '%'"
+		args = append(args, search)
+	}
+
+	q += " ORDER BY timestamp DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var logs []LogRow
+	for rows.Next() {
+		var l LogRow
+		if err := rows.Scan(&l.ID, &l.ProjectID, &l.Source, &l.Level, &l.Message, &l.Metadata, &l.Timestamp); err == nil {
+			l.Timestamp = formatTimestamp(l.Timestamp)
+			logs = append(logs, l)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if logs == nil {
+		logs = []LogRow{}
+	}
+	json.NewEncoder(w).Encode(logs)
+}
+
+// logsViewHandler renders the logs tab content.
+func logsViewHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl, err := template.ParseFS(templateFS, "templates/logs.html")
+	if err != nil {
+		// Fallback: try file system for development
+		tmpl, err = template.ParseFiles(filepath.Join("templates", "logs.html"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	_ = tmpl.Execute(w, nil)
 }
@@ -2730,6 +3186,18 @@ func newRouter() http.Handler {
 		topologyViewHandler(w, r)
 	})))
 
+	mux.Handle("/api/logs", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logsQueryHandler(w, r)
+	})))
+
+	mux.Handle("/api/logs/view", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logsViewHandler(w, r)
+	})))
+
+	mux.HandleFunc("/api/logs/ingest", func(w http.ResponseWriter, r *http.Request) {
+		logsIngestHandler(w, r)
+	})
+
 	mux.Handle("/api/performance", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		performanceHandler(w, r)
 	})))
@@ -2772,6 +3240,18 @@ func newRouter() http.Handler {
 
 	mux.Handle("/api/attachments/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attachmentHandler(w, r)
+	})))
+
+	mux.Handle("/api/replays/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// URL: /api/replays/{replay_id}
+		replayID := strings.TrimPrefix(r.URL.Path, "/api/replays/")
+		replayID = filepath.Base(replayID)
+		filePath := filepath.Join("data", "replays", replayID+".jsonl")
+		
+		// Set CORS headers so the frontend can fetch it easily if needed
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		http.ServeFile(w, r, filePath)
 	})))
 
 	// Public health check endpoint
@@ -2948,7 +3428,7 @@ const banner = `
 func printBanner(port, dbPath, user string, retDays int) {
 	fmt.Print(banner)
 	fmt.Println("  ──────────────────────────────────────────────────")
-	fmt.Printf("  🛡️  Version     : 3.0.0\n")
+	fmt.Printf("  🛡️  Version     : 3.1.0\n")
 	fmt.Printf("  🌐 Dashboard   : http://localhost:%s\n", port)
 	fmt.Printf("  📦 Database    : %s\n", dbPath)
 	fmt.Printf("  🔗 DSN         : http://public@localhost:%s/1\n", port)
@@ -3058,7 +3538,7 @@ func main() {
 					return
 				}
 				sourceNode := resolveProcessName(pid)
-				targetNode := destIP
+				targetNode := resolveIPToContainer(destIP)
 
 				// Upsert edge
 				_, err := db.Exec(`
@@ -3076,6 +3556,7 @@ func main() {
 			log.Printf("⚠️  Failed to start eBPF Agent: %v (Are you running as root?)", err)
 		} else {
 			log.Printf("🔥 eBPF Agent running! Monitoring global HTTP traffic for 500s...")
+			go flushContainerCache()
 		}
 	}
 

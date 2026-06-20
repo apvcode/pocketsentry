@@ -1,0 +1,167 @@
+<div class="space-y-6 animate-fade-in pb-12 h-[calc(100vh-16rem)] flex flex-col">
+    <div class="flex items-center justify-between shrink-0">
+        <div>
+            <h2 class="text-xl font-bold text-white">Application Logs <span class="text-xs bg-brand-500/20 text-brand-400 px-2 py-1 ml-2 rounded font-mono">Real-time</span></h2>
+            <p class="text-sm text-gray-400 mt-1">Centralized log aggregation for all your containers and services.</p>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="flex items-center gap-3 shrink-0">
+        <input type="search" id="log-search-input" name="search" placeholder="Search logs (e.g. timeout, connection refused)..." 
+               class="flex-1 bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2.5 outline-none font-mono"
+               oninput="debounceLogSearch()">
+        
+        <select id="log-level-filter" name="level" class="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2.5 outline-none" onchange="fetchLogs()">
+            <option value="All">All Levels</option>
+            <option value="info">Info</option>
+            <option value="warning">Warning</option>
+            <option value="error">Error</option>
+            <option value="debug">Debug</option>
+        </select>
+
+        <select id="log-source-filter" name="source" class="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2.5 outline-none w-48" onchange="fetchLogs()">
+            <option value="">All Sources</option>
+            <!-- We could dynamically populate this, but keeping it simple for now -->
+            <option value="app">App</option>
+            <option value="worker">Worker</option>
+            <option value="db">DB</option>
+        </select>
+
+        <button onclick="fetchLogs()" class="text-sm bg-gray-800 hover:bg-gray-700 text-white px-4 py-2.5 rounded-lg transition-colors flex items-center gap-2 border border-gray-700">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            Refresh
+        </button>
+    </div>
+
+    <!-- Logs Container -->
+    <div class="glass-card rounded-2xl border border-gray-700/50 shadow-xl overflow-hidden flex-1 relative flex flex-col">
+        <!-- Header row -->
+        <div class="flex items-center text-xs font-semibold text-gray-500 uppercase tracking-wider bg-gray-900/80 border-b border-gray-800 px-4 py-3 shrink-0">
+            <div class="w-48">Timestamp</div>
+            <div class="w-24">Level</div>
+            <div class="w-32">Source</div>
+            <div class="flex-1">Message</div>
+        </div>
+
+        <!-- Log entries -->
+        <div id="logs-container" class="flex-1 overflow-y-auto bg-[#0d1117] font-mono text-[13px] leading-relaxed relative">
+            <div id="logs-loading" class="absolute inset-0 flex flex-col items-center justify-center bg-[#0d1117]/80 z-10 hidden">
+                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-500 mb-4"></div>
+                 <span class="text-gray-400 font-sans text-sm">Searching logs...</span>
+            </div>
+            <div id="logs-list" class="flex flex-col min-h-full">
+                <!-- Filled via JS -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let logSearchTimeout = null;
+
+    function debounceLogSearch() {
+        if (logSearchTimeout) clearTimeout(logSearchTimeout);
+        logSearchTimeout = setTimeout(() => {
+            fetchLogs();
+        }, 300);
+    }
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        return text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+
+    function formatLevel(level) {
+        level = level.toLowerCase();
+        let colorClass = 'text-gray-400';
+        let bgClass = 'bg-gray-500/10 border-gray-500/20';
+        
+        if (level === 'error' || level === 'fatal' || level === 'crit') {
+            colorClass = 'text-red-400';
+            bgClass = 'bg-red-500/10 border-red-500/20';
+        } else if (level === 'warning' || level === 'warn') {
+            colorClass = 'text-amber-400';
+            bgClass = 'bg-amber-500/10 border-amber-500/20';
+        } else if (level === 'info') {
+            colorClass = 'text-blue-400';
+            bgClass = 'bg-blue-500/10 border-blue-500/20';
+        } else if (level === 'debug') {
+            colorClass = 'text-purple-400';
+            bgClass = 'bg-purple-500/10 border-purple-500/20';
+        }
+        
+        return `<span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${colorClass} ${bgClass} uppercase tracking-wider">${escapeHtml(level)}</span>`;
+    }
+
+    function fetchLogs() {
+        const search = document.getElementById('log-search-input').value;
+        const level = document.getElementById('log-level-filter').value;
+        const source = document.getElementById('log-source-filter').value;
+        const project = document.getElementById('project-filter') ? document.getElementById('project-filter').value : 'All';
+
+        const params = new URLSearchParams();
+        if (search) params.append('search', search);
+        if (level && level !== 'All') params.append('level', level);
+        if (source) params.append('source', source);
+        if (project && project !== 'All') params.append('project', project);
+
+        document.getElementById('logs-loading').classList.remove('hidden');
+
+        fetch(`/api/logs?${params.toString()}`)
+            .then(res => res.json())
+            .then(logs => {
+                document.getElementById('logs-loading').classList.add('hidden');
+                const list = document.getElementById('logs-list');
+                
+                if (!logs || logs.length === 0) {
+                    list.innerHTML = `<div class="flex-1 flex items-center justify-center text-gray-500 font-sans">No logs found matching your criteria.</div>`;
+                    return;
+                }
+
+                let html = '';
+                logs.forEach((log, index) => {
+                    const rowBg = index % 2 === 0 ? 'bg-transparent' : 'bg-gray-800/20';
+                    const hoverBg = 'hover:bg-gray-800/60';
+                    
+                    let metaBadge = '';
+                    if (log.metadata && log.metadata !== '{}') {
+                        const escapedMeta = escapeHtml(log.metadata);
+                        metaBadge = `<button class="ml-2 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded border border-gray-700 transition-colors" title="${escapedMeta}">{}</button>`;
+                    }
+
+                    // Highlight search terms if present
+                    let messageHtml = escapeHtml(log.message);
+                    if (search && search.length > 2) {
+                        const escapedSearch = escapeHtml(search);
+                        const regex = new RegExp(`(${escapedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+                        messageHtml = messageHtml.replace(regex, '<mark class="bg-brand-500/30 text-brand-200 px-0.5 rounded">$1</mark>');
+                    }
+
+                    html += `
+                        <div class="flex items-start px-4 py-1.5 ${rowBg} ${hoverBg} border-l-2 border-transparent transition-colors group">
+                            <div class="w-48 text-gray-500 shrink-0 select-none">${escapeHtml(log.timestamp)}</div>
+                            <div class="w-24 shrink-0">${formatLevel(log.level)}</div>
+                            <div class="w-32 text-gray-400 shrink-0 truncate pr-2" title="${escapeHtml(log.source)}">${escapeHtml(log.source)}</div>
+                            <div class="flex-1 text-gray-300 break-all whitespace-pre-wrap">${messageHtml}${metaBadge}</div>
+                        </div>
+                    `;
+                });
+                
+                list.innerHTML = html;
+            })
+            .catch(err => {
+                console.error("Logs Fetch Error:", err);
+                document.getElementById('logs-loading').classList.add('hidden');
+                document.getElementById('logs-list').innerHTML = `<div class="flex-1 flex items-center justify-center text-red-400 font-sans">Failed to fetch logs.</div>`;
+            });
+    }
+
+    // Auto-fetch on initial load
+    setTimeout(fetchLogs, 100);
+</script>
