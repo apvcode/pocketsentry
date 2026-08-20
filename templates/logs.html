@@ -1,8 +1,20 @@
 <div class="space-y-6 animate-fade-in pb-12 h-[calc(100vh-16rem)] flex flex-col">
     <div class="flex items-center justify-between shrink-0">
         <div>
-            <h2 class="text-xl font-bold text-white">Application Logs <span class="text-xs bg-brand-500/20 text-brand-400 px-2 py-1 ml-2 rounded font-mono">Real-time</span></h2>
-            <p class="text-sm text-gray-400 mt-1">Centralized log aggregation for all your containers and services.</p>
+            <h2 class="text-xl font-bold text-white flex items-center gap-2">
+                Application Logs 
+                <span id="live-tail-badge" class="text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded font-mono flex items-center gap-1.5">
+                    <span id="live-indicator" class="w-2 h-2 rounded-full bg-gray-500"></span>
+                    <span id="live-text">Static</span>
+                </span>
+            </h2>
+            <p class="text-sm text-gray-400 mt-1">Centralized log aggregation & real-time streaming for your applications.</p>
+        </div>
+        <div class="flex items-center gap-2">
+            <button id="live-tail-btn" onclick="toggleLiveTail()" class="text-xs px-3 py-2 rounded-lg font-medium transition-all flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                <span>Live Tail</span>
+            </button>
         </div>
     </div>
 
@@ -12,7 +24,7 @@
                class="flex-1 bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2.5 outline-none font-mono"
                oninput="debounceLogSearch()">
         
-        <select id="log-level-filter" name="level" class="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2.5 outline-none" onchange="fetchLogs()">
+        <select id="log-level-filter" name="level" class="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2.5 outline-none" onchange="onFilterChange()">
             <option value="All">All Levels</option>
             <option value="info">Info</option>
             <option value="warning">Warning</option>
@@ -20,12 +32,12 @@
             <option value="debug">Debug</option>
         </select>
 
-        <select id="log-source-filter" name="source" class="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2.5 outline-none w-48" onchange="fetchLogs()">
+        <select id="log-source-filter" name="source" class="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg focus:ring-brand-500 focus:border-brand-500 block p-2.5 outline-none w-48" onchange="onFilterChange()">
             <option value="">All Sources</option>
-            <!-- We could dynamically populate this, but keeping it simple for now -->
             <option value="app">App</option>
             <option value="worker">Worker</option>
             <option value="db">DB</option>
+            <option value="otlp">OTLP</option>
         </select>
 
         <button onclick="fetchLogs()" class="text-sm bg-gray-800 hover:bg-gray-700 text-white px-4 py-2.5 rounded-lg transition-colors flex items-center gap-2 border border-gray-700">
@@ -59,12 +71,77 @@
 
 <script>
     let logSearchTimeout = null;
+    let eventSource = null;
+    let isLiveTail = false;
 
     function debounceLogSearch() {
         if (logSearchTimeout) clearTimeout(logSearchTimeout);
         logSearchTimeout = setTimeout(() => {
             fetchLogs();
         }, 300);
+    }
+
+    function onFilterChange() {
+        fetchLogs();
+        if (isLiveTail) {
+            startLiveTail();
+        }
+    }
+
+    function toggleLiveTail() {
+        isLiveTail = !isLiveTail;
+        const btn = document.getElementById('live-tail-btn');
+        const badge = document.getElementById('live-tail-badge');
+        const indicator = document.getElementById('live-indicator');
+        const liveText = document.getElementById('live-text');
+
+        if (isLiveTail) {
+            btn.classList.add('bg-emerald-500/20', 'text-emerald-400', 'border-emerald-500/40');
+            btn.classList.remove('bg-gray-800', 'text-gray-300', 'border-gray-700');
+            badge.className = 'text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded font-mono flex items-center gap-1.5';
+            indicator.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-ping';
+            liveText.innerText = 'Live Streaming';
+            startLiveTail();
+        } else {
+            btn.classList.remove('bg-emerald-500/20', 'text-emerald-400', 'border-emerald-500/40');
+            btn.classList.add('bg-gray-800', 'text-gray-300', 'border-gray-700');
+            badge.className = 'text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded font-mono flex items-center gap-1.5';
+            indicator.className = 'w-2 h-2 rounded-full bg-gray-500';
+            liveText.innerText = 'Static';
+            stopLiveTail();
+        }
+    }
+
+    function startLiveTail() {
+        stopLiveTail();
+        const level = document.getElementById('log-level-filter').value;
+        const project = document.getElementById('project-filter') ? document.getElementById('project-filter').value : 'All';
+
+        const params = new URLSearchParams();
+        if (level && level !== 'All') params.append('level', level);
+        if (project && project !== 'All') params.append('project', project);
+
+        eventSource = new EventSource(`/api/logs/stream?${params.toString()}`);
+
+        eventSource.onmessage = function(e) {
+            try {
+                const log = JSON.parse(e.data);
+                appendSingleLog(log);
+            } catch (err) {
+                console.error("SSE parse error", err);
+            }
+        };
+
+        eventSource.onerror = function() {
+            console.warn("Live tail SSE connection interrupted, reconnecting...");
+        };
+    }
+
+    function stopLiveTail() {
+        if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+        }
     }
 
     function escapeHtml(text) {
@@ -78,7 +155,7 @@
     }
 
     function formatLevel(level) {
-        level = level.toLowerCase();
+        level = (level || 'info').toLowerCase();
         let colorClass = 'text-gray-400';
         let bgClass = 'bg-gray-500/10 border-gray-500/20';
         
@@ -97,6 +174,43 @@
         }
         
         return `<span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${colorClass} ${bgClass} uppercase tracking-wider">${escapeHtml(level)}</span>`;
+    }
+
+    function appendSingleLog(log) {
+        const list = document.getElementById('logs-list');
+        const search = document.getElementById('log-search-input').value;
+        const source = document.getElementById('log-source-filter').value;
+
+        if (source && log.source !== source) return;
+        if (search && !log.message.toLowerCase().includes(search.toLowerCase())) return;
+
+        let metaBadge = '';
+        if (log.metadata && log.metadata !== '{}') {
+            const escapedMeta = escapeHtml(log.metadata);
+            metaBadge = `<button class="ml-2 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded border border-gray-700 transition-colors" title="${escapedMeta}">{}</button>`;
+        }
+
+        let messageHtml = escapeHtml(log.message);
+        if (search && search.length > 2) {
+            const escapedSearch = escapeHtml(search);
+            const regex = new RegExp(`(${escapedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+            messageHtml = messageHtml.replace(regex, '<mark class="bg-brand-500/30 text-brand-200 px-0.5 rounded">$1</mark>');
+        }
+
+        const div = document.createElement('div');
+        div.className = 'flex items-start px-4 py-1.5 hover:bg-gray-800/60 border-l-2 border-emerald-500/40 bg-emerald-500/5 transition-all duration-300 animate-fade-in group';
+        div.innerHTML = `
+            <div class="w-48 text-gray-500 shrink-0 select-none">${escapeHtml(log.timestamp)}</div>
+            <div class="w-24 shrink-0">${formatLevel(log.level)}</div>
+            <div class="w-32 text-gray-400 shrink-0 truncate pr-2" title="${escapeHtml(log.source)}">${escapeHtml(log.source)}</div>
+            <div class="flex-1 text-gray-300 break-all whitespace-pre-wrap">${messageHtml}${metaBadge}</div>
+        `;
+
+        if (list.firstChild) {
+            list.insertBefore(div, list.firstChild);
+        } else {
+            list.appendChild(div);
+        }
     }
 
     function fetchLogs() {
@@ -135,7 +249,6 @@
                         metaBadge = `<button class="ml-2 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded border border-gray-700 transition-colors" title="${escapedMeta}">{}</button>`;
                     }
 
-                    // Highlight search terms if present
                     let messageHtml = escapeHtml(log.message);
                     if (search && search.length > 2) {
                         const escapedSearch = escapeHtml(search);

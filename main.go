@@ -1,14 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"embed"
-	"math"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
@@ -16,6 +12,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,19 +22,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"net"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/pocketsentry/pocketsentry/ebpf"
-	"github.com/go-sourcemap/sourcemap"
+	"github.com/pocketsentry/pocketsentry/internal/container"
+	"github.com/pocketsentry/pocketsentry/internal/helpers"
+	"github.com/pocketsentry/pocketsentry/internal/middleware"
+	"github.com/pocketsentry/pocketsentry/internal/models"
+	"github.com/pocketsentry/pocketsentry/internal/notify"
+	"github.com/pocketsentry/pocketsentry/internal/sentry"
+	"github.com/pocketsentry/pocketsentry/internal/sourcemap"
+	"github.com/pocketsentry/pocketsentry/internal/update"
 	_ "modernc.org/sqlite"
 )
-
-// currentVersion is the version of this binary, compared against GitHub releases.
-const currentVersion = "v3.1.0"
 
 // templateFS embeds the templates directory into the binary so the final
 // executable is fully self-contained — no external files needed.
@@ -52,9 +52,7 @@ var (
 	tmplDetail *template.Template
 )
 
-// initTemplates parses the embedded templates once at startup. This is both
-// faster (no re-parsing on every request) and safer (parse errors surface
-// immediately instead of at runtime).
+// initTemplates parses the embedded templates once at startup.
 func initTemplates() error {
 	var err error
 	tmplIndex, err = template.ParseFS(templateFS, "templates/index.html")
@@ -221,6 +219,27 @@ func initDB(path string) error {
 		CREATE INDEX IF NOT EXISTS idx_app_logs_project ON app_logs(project_id);
 		CREATE INDEX IF NOT EXISTS idx_app_logs_timestamp ON app_logs(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_app_logs_level ON app_logs(level);
+
+		CREATE TABLE IF NOT EXISTS log_alerting_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id TEXT NOT NULL DEFAULT '',
+			level TEXT NOT NULL DEFAULT '',
+			pattern TEXT NOT NULL,
+			target_discord TEXT NOT NULL DEFAULT '',
+			target_telegram_token TEXT NOT NULL DEFAULT '',
+			target_telegram_chat_id TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS api_keys (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			key TEXT UNIQUE NOT NULL,
+			project_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'viewer',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("create performance tables: %w", err)
@@ -238,9 +257,10 @@ func initDB(path string) error {
 // ---------- Ingestion Metrics ----------
 
 var (
-	ingestCount    int64 // atomic counter for events ingested
-	ingestCountMin int64 // snapshot for per-minute rate
-	dbFilePath     string
+	ingestCount         int64
+	dbFilePath          string
+	startTime           time.Time
+	globalRetentionDays int
 )
 
 func incrIngestCount() {
@@ -250,8 +270,7 @@ func incrIngestCount() {
 // ---------- Smart Grouping ----------
 
 // applyGroupingRules normalizes the event message by applying all enabled
-// grouping rules for the given project. This allows deduplication of events
-// that differ only by dynamic IDs, hashes, or timestamps.
+// grouping rules for the given project.
 func applyGroupingRules(msg, projectID string) string {
 	rows, err := db.Query(
 		`SELECT pattern, replacement FROM grouping_rules
@@ -286,7 +305,6 @@ func saveAttachment(eventID, filename, contentType string, data []byte) error {
 		return fmt.Errorf("mkdir attachments: %w", err)
 	}
 
-	// Sanitize filename
 	safeName := filepath.Base(filename)
 	if safeName == "" || safeName == "." || safeName == ".." {
 		safeName = "attachment"
@@ -297,7 +315,7 @@ func saveAttachment(eventID, filename, contentType string, data []byte) error {
 		return fmt.Errorf("write attachment: %w", err)
 	}
 
-	id := generateUUID()
+	id := helpers.GenerateUUID()
 	_, err := db.Exec(
 		`INSERT INTO attachments (id, event_id, filename, content_type, size_bytes)
 		 VALUES (?, ?, ?, ?, ?)`,
@@ -311,19 +329,8 @@ func saveAttachment(eventID, filename, contentType string, data []byte) error {
 	return nil
 }
 
-// Attachment is the struct for attachment metadata.
-type Attachment struct {
-	ID          string
-	EventID     string
-	Filename    string
-	ContentType string
-	SizeBytes   int
-	CreatedAt   string
-	IsImage     bool
-}
-
 // queryAttachments returns all attachments for a given event.
-func queryAttachments(eventID string) []Attachment {
+func queryAttachments(eventID string) []models.Attachment {
 	rows, err := db.Query(
 		`SELECT id, filename, content_type, size_bytes, created_at
 		 FROM attachments WHERE event_id = ? ORDER BY created_at ASC`, eventID)
@@ -332,15 +339,15 @@ func queryAttachments(eventID string) []Attachment {
 	}
 	defer rows.Close()
 
-	var result []Attachment
+	var result []models.Attachment
 	for rows.Next() {
-		var a Attachment
+		var a models.Attachment
 		if err := rows.Scan(&a.ID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.CreatedAt); err != nil {
 			continue
 		}
 		a.EventID = eventID
 		a.IsImage = strings.HasPrefix(a.ContentType, "image/")
-		a.CreatedAt = formatTimestamp(a.CreatedAt)
+		a.CreatedAt = helpers.FormatTimestamp(a.CreatedAt)
 		result = append(result, a)
 	}
 	return result
@@ -348,32 +355,9 @@ func queryAttachments(eventID string) []Attachment {
 
 // ---------- System Metrics ----------
 
-// SystemMetrics holds all system health data for the dashboard.
-type SystemMetrics struct {
-	Version          string  `json:"version"`
-	Uptime           string  `json:"uptime"`
-	UptimeSeconds    float64 `json:"uptime_seconds"`
-	DBSizeBytes      int64   `json:"db_size_bytes"`
-	DBSizeHuman      string  `json:"db_size_human"`
-	TotalEvents      int     `json:"total_events"`
-	UnresolvedEvents int     `json:"unresolved_events"`
-	ResolvedEvents   int     `json:"resolved_events"`
-	SnoozedEvents    int     `json:"snoozed_events"`
-	TotalProjects    int     `json:"total_projects"`
-	TotalTransactions int    `json:"total_transactions"`
-	EventsPerMinute  float64 `json:"events_per_minute"`
-	TotalAttachments int     `json:"total_attachments"`
-	GroupingRules    int     `json:"grouping_rules"`
-	RetentionDays    int     `json:"retention_days"`
-	GoVersion        string  `json:"go_version"`
-	GoRoutines       int     `json:"goroutines"`
-	MemAllocMB       float64 `json:"mem_alloc_mb"`
-	TotalLogs        int     `json:"total_logs"`
-}
-
-func querySystemMetrics() SystemMetrics {
-	m := SystemMetrics{
-		Version:       currentVersion,
+func querySystemMetrics() models.SystemMetrics {
+	m := models.SystemMetrics{
+		Version:       update.CurrentVersion,
 		Uptime:        time.Since(startTime).Round(time.Second).String(),
 		UptimeSeconds: time.Since(startTime).Seconds(),
 		RetentionDays: globalRetentionDays,
@@ -381,20 +365,17 @@ func querySystemMetrics() SystemMetrics {
 		GoRoutines:    runtime.NumGoroutine(),
 	}
 
-	// Memory stats
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 	m.MemAllocMB = math.Round(float64(memStats.Alloc)/1024/1024*100) / 100
 
-	// DB file size
 	if dbFilePath != "" {
 		if info, err := os.Stat(dbFilePath); err == nil {
 			m.DBSizeBytes = info.Size()
-			m.DBSizeHuman = humanBytes(info.Size())
+			m.DBSizeHuman = helpers.HumanBytes(info.Size())
 		}
 	}
 
-	// Counts
 	_ = db.QueryRow("SELECT COUNT(*) FROM events").Scan(&m.TotalEvents)
 	_ = db.QueryRow("SELECT COUNT(*) FROM events WHERE status = 'unresolved'").Scan(&m.UnresolvedEvents)
 	_ = db.QueryRow("SELECT COUNT(*) FROM events WHERE status = 'resolved'").Scan(&m.ResolvedEvents)
@@ -405,7 +386,6 @@ func querySystemMetrics() SystemMetrics {
 	_ = db.QueryRow("SELECT COUNT(*) FROM app_logs").Scan(&m.TotalLogs)
 	_ = db.QueryRow("SELECT COUNT(*) FROM grouping_rules WHERE enabled = 1").Scan(&m.GroupingRules)
 
-	// Events per minute (based on atomic counter)
 	total := atomic.LoadInt64(&ingestCount)
 	upMin := time.Since(startTime).Minutes()
 	if upMin > 0 {
@@ -415,33 +395,16 @@ func querySystemMetrics() SystemMetrics {
 	return m
 }
 
-func humanBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-// saveEvent inserts a new event or increments the counter of an existing
-// duplicate. Duplicates are identified by (project_id, message, level).
-func saveEvent(ev SentryEvent, projectID, rawPayload string) error {
+// saveEvent inserts a new event or increments the counter of an existing duplicate.
+func saveEvent(ev models.SentryEvent, projectID, rawPayload string) error {
 	if ev.EventID == "" {
-		ev.EventID = generateUUID()
+		ev.EventID = helpers.GenerateUUID()
 	}
 	if ev.Level == "" {
 		ev.Level = "error"
 	}
 
-	// Track ingestion rate
 	incrIngestCount()
-
-	// Apply smart grouping rules to normalize the message for dedup
 	ev.Message = applyGroupingRules(ev.Message, projectID)
 
 	ts := time.Now().UTC()
@@ -488,82 +451,25 @@ func saveEvent(ev SentryEvent, projectID, rawPayload string) error {
 		return fmt.Errorf("upsert event: %w", err)
 	}
 	log.Printf("event project=%s level=%s msg=%q count=%d status=%s",
-		projectID, ev.Level, truncate(ev.Message, 80), newCount, newStatus)
+		projectID, ev.Level, helpers.Truncate(ev.Message, 80), newCount, newStatus)
 
 	shouldNotify := isNew || (oldStatus == "resolved" && newStatus == "unresolved") || (oldStatus == "snoozed" && newStatus == "unresolved")
-	evaluateAndTriggerWebhooks(ev, projectID, shouldNotify)
+	notify.EvaluateAndTriggerWebhooks(ev, projectID, shouldNotify)
 
 	return nil
 }
 
-// ---------- Event Row (UI) ----------
-
-// EventRow is the struct passed to HTML templates for rendering.
-// All fields are plain strings so we never hit nil-pointer issues from
-// NULL columns (the query uses COALESCE as an extra safety net).
-type EventRow struct {
-	ID        string
-	ProjectID string
-	LastSeen  string
-	Level     string
-	Platform  string
-	Message   string
-	Count     int
-	Status    string
-	Release   string
-}
-
-// SentryTransaction models a Performance Monitoring transaction payload.
-type SentryTransaction struct {
-	EventID        string       `json:"event_id"`
-	Transaction    string       `json:"transaction"`
-	StartTimestamp interface{}  `json:"start_timestamp"`
-	Timestamp      interface{}  `json:"timestamp"`
-	Spans          []SentrySpan `json:"spans"`
-}
-
-// SentrySpan models a child operation within a transaction.
-type SentrySpan struct {
-	SpanID         string      `json:"span_id"`
-	ParentSpanID   string      `json:"parent_span_id"`
-	Op             string      `json:"op"`
-	Description    string      `json:"description"`
-	StartTimestamp interface{} `json:"start_timestamp"`
-	Timestamp      interface{} `json:"timestamp"`
-}
-
-// parseSentryTimestamp converts float64 (unix seconds) or string (RFC3339) to time.Time
-func parseSentryTimestamp(v interface{}) time.Time {
-	if f, ok := v.(float64); ok {
-		sec := int64(f)
-		nsec := int64((f - float64(sec)) * 1e9)
-		return time.Unix(sec, nsec).UTC()
-	}
-	if s, ok := v.(string); ok {
-		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-			return t.UTC()
-		}
-		if t, err := time.Parse(time.RFC3339, s); err == nil {
-			return t.UTC()
-		}
-		if t, err := time.Parse("2006-01-02T15:04:05", s); err == nil {
-			return t.UTC()
-		}
-	}
-	return time.Now().UTC()
-}
-
 // saveTransaction inserts a transaction and its spans into the database.
-func saveTransaction(tx SentryTransaction, projectID, rawPayload string) error {
+func saveTransaction(tx models.SentryTransaction, projectID, rawPayload string) error {
 	if tx.EventID == "" {
-		tx.EventID = generateUUID()
+		tx.EventID = helpers.GenerateUUID()
 	}
 	if tx.Transaction == "" {
 		tx.Transaction = "unknown_transaction"
 	}
 
-	startTs := parseSentryTimestamp(tx.StartTimestamp)
-	endTs := parseSentryTimestamp(tx.Timestamp)
+	startTs := helpers.ParseSentryTimestamp(tx.StartTimestamp)
+	endTs := helpers.ParseSentryTimestamp(tx.Timestamp)
 	durationMs := endTs.Sub(startTs).Seconds() * 1000.0
 
 	if durationMs < 0 {
@@ -584,8 +490,8 @@ func saveTransaction(tx SentryTransaction, projectID, rawPayload string) error {
 		if span.SpanID == "" {
 			continue
 		}
-		spanStart := parseSentryTimestamp(span.StartTimestamp)
-		spanEnd := parseSentryTimestamp(span.Timestamp)
+		spanStart := helpers.ParseSentryTimestamp(span.StartTimestamp)
+		spanEnd := helpers.ParseSentryTimestamp(span.Timestamp)
 		spanDur := spanEnd.Sub(spanStart).Seconds() * 1000.0
 		if spanDur < 0 {
 			spanDur = 0
@@ -602,16 +508,7 @@ func saveTransaction(tx SentryTransaction, projectID, rawPayload string) error {
 
 // ---------- Transactions & Spans DB Queries ----------
 
-type TransactionGroupRow struct {
-	ExemplarID    string
-	ProjectID     string
-	Name          string
-	Count         int
-	AvgDurationMs float64
-	MaxDurationMs float64
-}
-
-func queryTransactionGroups() ([]TransactionGroupRow, error) {
+func queryTransactionGroups() ([]models.TransactionGroupRow, error) {
 	q := `
 		SELECT t1.id, t1.project_id, t1.name, t2.cnt, t2.avg_ms, t2.max_ms
 		FROM transactions t1
@@ -630,9 +527,9 @@ func queryTransactionGroups() ([]TransactionGroupRow, error) {
 	}
 	defer rows.Close()
 
-	var groups []TransactionGroupRow
+	var groups []models.TransactionGroupRow
 	for rows.Next() {
-		var g TransactionGroupRow
+		var g models.TransactionGroupRow
 		if err := rows.Scan(&g.ExemplarID, &g.ProjectID, &g.Name, &g.Count, &g.AvgDurationMs, &g.MaxDurationMs); err == nil {
 			groups = append(groups, g)
 		}
@@ -640,15 +537,7 @@ func queryTransactionGroups() ([]TransactionGroupRow, error) {
 	return groups, nil
 }
 
-type SpanRow struct {
-	ID             string
-	Op             string
-	Description    string
-	StartTimestamp time.Time
-	DurationMs     float64
-}
-
-func querySpans(transactionID string) ([]SpanRow, error) {
+func querySpans(transactionID string) ([]models.SpanRow, error) {
 	q := `SELECT id, op, description, start_timestamp, duration_ms FROM spans WHERE transaction_id = ? ORDER BY start_timestamp ASC`
 	rows, err := db.Query(q, transactionID)
 	if err != nil {
@@ -656,9 +545,9 @@ func querySpans(transactionID string) ([]SpanRow, error) {
 	}
 	defer rows.Close()
 
-	var spans []SpanRow
+	var spans []models.SpanRow
 	for rows.Next() {
-		var s SpanRow
+		var s models.SpanRow
 		var ts string
 		if err := rows.Scan(&s.ID, &s.Op, &s.Description, &ts, &s.DurationMs); err == nil {
 			if parsed, e := time.Parse(time.RFC3339Nano, ts); e == nil {
@@ -671,7 +560,7 @@ func querySpans(transactionID string) ([]SpanRow, error) {
 }
 
 // queryEvents returns the latest events for the dashboard.
-func queryEvents(limit int, levelFilter string, searchFilter string, projectFilter string, envFilter string) ([]EventRow, error) {
+func queryEvents(limit int, levelFilter string, searchFilter string, projectFilter string, envFilter string) ([]models.EventRow, error) {
 	var q string
 	var args []interface{}
 
@@ -719,9 +608,9 @@ func queryEvents(limit int, levelFilter string, searchFilter string, projectFilt
 	}
 	defer rows.Close()
 
-	var result []EventRow
+	var result []models.EventRow
 	for rows.Next() {
-		var ev EventRow
+		var ev models.EventRow
 		var release sql.NullString
 		if err := rows.Scan(&ev.ID, &ev.ProjectID, &ev.LastSeen, &ev.Level, &ev.Platform, &ev.Message, &ev.Count, &ev.Status, &release); err != nil {
 			log.Printf("scan row: %v", err)
@@ -730,7 +619,7 @@ func queryEvents(limit int, levelFilter string, searchFilter string, projectFilt
 		if release.Valid {
 			ev.Release = release.String
 		}
-		ev.LastSeen = formatTimestamp(ev.LastSeen)
+		ev.LastSeen = helpers.FormatTimestamp(ev.LastSeen)
 		result = append(result, ev)
 	}
 	if err := rows.Err(); err != nil {
@@ -739,16 +628,8 @@ func queryEvents(limit int, levelFilter string, searchFilter string, projectFilt
 	return result, nil
 }
 
-// ---------- Stats ----------
-
-// StatPoint represents a single day's count of events.
-type StatPoint struct {
-	Date  string `json:"date"`
-	Count int    `json:"count"`
-}
-
 // queryStats returns the total count of events per day for the last 7 days.
-func queryStats() ([]StatPoint, error) {
+func queryStats() ([]models.StatPoint, error) {
 	const q = `
 		WITH RECURSIVE dates(date) AS (
 			SELECT date('now', '-6 days')
@@ -771,9 +652,9 @@ func queryStats() ([]StatPoint, error) {
 	}
 	defer rows.Close()
 
-	var result []StatPoint
+	var result []models.StatPoint
 	for rows.Next() {
-		var sp StatPoint
+		var sp models.StatPoint
 		if err := rows.Scan(&sp.Date, &sp.Count); err != nil {
 			log.Printf("scan stat: %v", err)
 			continue
@@ -804,134 +685,8 @@ func queryEnvironments() ([]string, error) {
 	return envs, nil
 }
 
-// formatTimestamp converts an RFC3339 timestamp into a shorter, more readable
-// format for the dashboard (e.g. "2026-06-09 14:12:23").
-func formatTimestamp(raw string) string {
-	t, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return raw
-	}
-	return t.Format("2006-01-02 15:04:05")
-}
-
-// ---------- Event Detail ----------
-
-// StackFrame represents a single frame in a stack trace.
-type StackFrame struct {
-	Filename    string   `json:"filename"`
-	Function    string   `json:"function"`
-	Module      string   `json:"module"`
-	Lineno      int      `json:"lineno"`
-	Colno       int      `json:"colno"`
-	AbsPath     string   `json:"abs_path"`
-	ContextLine string   `json:"context_line"`
-	PreContext  []string `json:"pre_context"`
-	PostContext []string `json:"post_context"`
-	InApp       bool     `json:"in_app"`
-}
-
-// rawExceptionValue extends the ingestion struct with stacktrace data.
-type rawExceptionValue struct {
-	Type       string `json:"type"`
-	Value      string `json:"value"`
-	Stacktrace *struct {
-		Frames []StackFrame `json:"frames"`
-	} `json:"stacktrace,omitempty"`
-}
-
-// rawPayloadDetail is used to extract rich metadata from the stored JSON.
-type rawPayloadDetail struct {
-	EventID     string            `json:"event_id"`
-	Timestamp   string            `json:"timestamp"`
-	Level       string            `json:"level"`
-	Platform    string            `json:"platform"`
-	ServerName  string            `json:"server_name"`
-	Environment string            `json:"environment"`
-	Release     string            `json:"release"`
-	Tags        map[string]string `json:"tags"`
-	Contexts    map[string]json.RawMessage `json:"contexts"`
-	User        *struct {
-		IP    string `json:"ip_address"`
-		Email string `json:"email"`
-	} `json:"user,omitempty"`
-	Request *struct {
-		URL    string            `json:"url"`
-		Method string            `json:"method"`
-		Headers map[string]string `json:"headers"`
-	} `json:"request,omitempty"`
-	Exception *struct {
-		Values []rawExceptionValue `json:"values"`
-	} `json:"exception,omitempty"`
-	SDK *struct {
-		Name    string `json:"name"`
-		Version string `json:"version"`
-	} `json:"sdk,omitempty"`
-	Breadcrumbs json.RawMessage `json:"breadcrumbs,omitempty"`
-}
-
-// Breadcrumb represents a single breadcrumb entry.
-type Breadcrumb struct {
-	Timestamp string
-	Type      string
-	Category  string
-	Level     string
-	Message   string
-	Data      map[string]interface{}
-}
-
-// EventComment represents a user note on a specific event.
-type EventComment struct {
-	ID        int
-	EventID   string
-	Comment   string
-	Timestamp string
-	Author    string
-}
-
-// EventDetail is the struct passed to the detail.html template.
-type EventDetail struct {
-	ID          string
-	ProjectID   string
-	Timestamp   string
-	LastSeen    string
-	Level       string
-	Platform    string
-	Message     string
-	Count       int
-	Status      string
-	ResolvedInRelease string
-	SnoozedUntil      string
-
-	ExcType     string
-	ExcValue    string
-
-	OS          string
-	Browser     string
-	Runtime     string
-	ServerName  string
-	Environment string
-	Release     string
-	IP          string
-	URL         string
-	SDKName     string
-
-	Frames      []StackFrame
-	HasFrames   bool
-	Tags        map[string]string
-	HasTags     bool
-	Breadcrumbs []Breadcrumb
-	HasBreadcrumbs bool
-	Comments    []EventComment
-	Attachments []Attachment
-	HasAttachments bool
-	HasLibraryFrames bool
-	RawJSON     string
-	ReplayID    string
-	HasReplay   bool
-}
-
 // queryEventByID fetches a single event from the database.
-func queryEventByID(id string) (*EventDetail, error) {
+func queryEventByID(id string) (*models.EventDetail, error) {
 	const q = `
 		SELECT
 			COALESCE(id, ''),
@@ -948,7 +703,7 @@ func queryEventByID(id string) (*EventDetail, error) {
 			COALESCE(raw_payload, '{}')
 		FROM events WHERE id = ?
 	`
-	var ev EventDetail
+	var ev models.EventDetail
 	var rawPayload string
 	err := db.QueryRow(q, id).Scan(
 		&ev.ID, &ev.ProjectID, &ev.Timestamp, &ev.LastSeen,
@@ -958,10 +713,9 @@ func queryEventByID(id string) (*EventDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	ev.Timestamp = formatTimestamp(ev.Timestamp)
-	ev.LastSeen = formatTimestamp(ev.LastSeen)
+	ev.Timestamp = helpers.FormatTimestamp(ev.Timestamp)
+	ev.LastSeen = helpers.FormatTimestamp(ev.LastSeen)
 
-	// Pretty-print raw JSON for display.
 	var buf bytes.Buffer
 	if json.Indent(&buf, []byte(rawPayload), "", "  ") == nil {
 		ev.RawJSON = buf.String()
@@ -969,8 +723,7 @@ func queryEventByID(id string) (*EventDetail, error) {
 		ev.RawJSON = rawPayload
 	}
 
-	// Parse metadata from raw payload.
-	var detail rawPayloadDetail
+	var detail models.RawPayloadDetail
 	if json.Unmarshal([]byte(rawPayload), &detail) == nil {
 		ev.OS = extractContextField(detail.Contexts, "os", "name", "version")
 		ev.Browser = extractContextField(detail.Contexts, "browser", "name", "version")
@@ -983,7 +736,6 @@ func queryEventByID(id string) (*EventDetail, error) {
 			ev.HasTags = true
 		}
 
-		// Extract ReplayID
 		if replayId, ok := ev.Tags["replayId"]; ok && replayId != "" {
 			ev.ReplayID = replayId
 		} else {
@@ -1019,9 +771,7 @@ func queryEventByID(id string) (*EventDetail, error) {
 				Data      map[string]interface{} `json:"data"`
 			}
 
-			// Try to parse as array first
 			if err := json.Unmarshal(detail.Breadcrumbs, &bcArray); err != nil {
-				// Fallback to object format { "values": [...] }
 				var bcObj struct {
 					Values []struct {
 						Type      string                 `json:"type"`
@@ -1040,11 +790,11 @@ func queryEventByID(id string) (*EventDetail, error) {
 			if len(bcArray) > 0 {
 				ev.HasBreadcrumbs = true
 				for _, bc := range bcArray {
-					ts := parseSentryTimestamp(bc.Timestamp).Format("15:04:05")
+					ts := helpers.ParseSentryTimestamp(bc.Timestamp).Format("15:04:05")
 					if bc.Level == "" {
 						bc.Level = "info"
 					}
-					ev.Breadcrumbs = append(ev.Breadcrumbs, Breadcrumb{
+					ev.Breadcrumbs = append(ev.Breadcrumbs, models.Breadcrumb{
 						Timestamp: ts,
 						Type:      bc.Type,
 						Category:  bc.Category,
@@ -1062,14 +812,12 @@ func queryEventByID(id string) (*EventDetail, error) {
 			ev.ExcType = exc.Type
 			ev.ExcValue = exc.Value
 			if exc.Stacktrace != nil && len(exc.Stacktrace.Frames) > 0 {
-				// Sentry sends frames bottom-up; reverse for display.
 				frames := exc.Stacktrace.Frames
 				for i, j := 0, len(frames)-1; i < j; i, j = i+1, j-1 {
 					frames[i], frames[j] = frames[j], frames[i]
 				}
-				
-				// Apply Source Maps if available
-				ev.Frames = applySourceMaps(frames, ev.ProjectID, ev.Release)
+
+				ev.Frames = sourcemap.ApplySourceMaps(frames, ev.ProjectID, ev.Release, dbFilePath)
 				ev.HasFrames = true
 				for _, f := range ev.Frames {
 					if !f.InApp {
@@ -1086,11 +834,11 @@ func queryEventByID(id string) (*EventDetail, error) {
 	if err == nil {
 		defer cRows.Close()
 		for cRows.Next() {
-			var c EventComment
+			var c models.EventComment
 			var ts string
 			if err := cRows.Scan(&c.ID, &c.Comment, &ts, &c.Author); err == nil {
 				c.EventID = id
-				c.Timestamp = formatTimestamp(ts)
+				c.Timestamp = helpers.FormatTimestamp(ts)
 				ev.Comments = append(ev.Comments, c)
 			}
 		}
@@ -1103,77 +851,6 @@ func queryEventByID(id string) (*EventDetail, error) {
 	return &ev, nil
 }
 
-// applySourceMaps attempts to translate minified frames using local .map files.
-func applySourceMaps(frames []StackFrame, projectID, release string) []StackFrame {
-	dataDir := filepath.Dir(dbFilePath)
-	for i, frame := range frames {
-		// e.g. "http://domain.com/js/main.min.js" -> "main.min.js"
-		if frame.Filename == "" && frame.AbsPath != "" {
-			frame.Filename = frame.AbsPath
-		}
-		
-		base := filepath.Base(frame.Filename)
-		if base == "" || !strings.HasSuffix(base, ".js") {
-			continue
-		}
-
-		// Look in data/sourcemaps/{projectID}/{release}/ first
-		var data []byte
-		var err error
-		var actualMapPath string
-		if projectID != "" && release != "" {
-			actualMapPath = filepath.Join(dataDir, "sourcemaps", projectID, release, base+".map")
-			data, err = os.ReadFile(actualMapPath)
-		}
-
-		// Fallback to local ./sourcemaps/
-		if err != nil || len(data) == 0 {
-			actualMapPath = filepath.Join("sourcemaps", base+".map")
-			data, err = os.ReadFile(actualMapPath)
-		}
-
-		if err != nil {
-			continue // Map file not found
-		}
-
-		smap, err := sourcemap.Parse("", data)
-		if err != nil {
-			log.Printf("failed to parse sourcemap %s: %v", actualMapPath, err)
-			continue
-		}
-
-		source, name, line, col, ok := smap.Source(frame.Lineno, frame.Colno)
-		if ok {
-			frames[i].Filename = source
-			frames[i].Lineno = line
-			frames[i].Colno = col
-			if name != "" {
-				frames[i].Function = name
-			}
-			
-			// Optional: Try to extract context lines if sourcesContent is present
-			if content := smap.SourceContent(source); content != "" {
-				lines := strings.Split(content, "\n")
-				if line > 0 && line <= len(lines) {
-					frames[i].ContextLine = lines[line-1]
-					
-					// Pre context
-					preStart := line - 4
-					if preStart < 0 { preStart = 0 }
-					frames[i].PreContext = lines[preStart : line-1]
-					
-					// Post context
-					postEnd := line + 3
-					if postEnd > len(lines) { postEnd = len(lines) }
-					frames[i].PostContext = lines[line : postEnd]
-				}
-			}
-		}
-	}
-	return frames
-}
-
-// extractContextField reads "name" and "version" from a context entry.
 func extractContextField(contexts map[string]json.RawMessage, key, nameKey, versionKey string) string {
 	data, ok := contexts[key]
 	if !ok {
@@ -1194,501 +871,7 @@ func extractContextField(contexts map[string]json.RawMessage, key, nameKey, vers
 	return name
 }
 
-// ---------- Sentry Event Parsing ----------
-
-// SentryEvent represents the subset of Sentry event fields we care about.
-type SentryEvent struct {
-	EventID     string `json:"event_id"`
-	Timestamp   string `json:"timestamp,omitempty"`
-	Level       string `json:"level"`
-	Platform    string `json:"platform"`
-	Message     string `json:"message"`
-	Logger      string `json:"logger"`
-	Environment string `json:"environment"`
-
-	Exception *SentryException `json:"exception,omitempty"`
-	LogEntry  *SentryLogEntry  `json:"logentry,omitempty"`
-}
-
-// SentryException wraps the array of exception values.
-type SentryException struct {
-	Values []SentryExceptionValue `json:"values"`
-}
-
-// SentryExceptionValue is a single exception in the chain.
-type SentryExceptionValue struct {
-	Type  string `json:"type"`
-	Value string `json:"value"`
-}
-
-// SentryLogEntry is an alternative message format used by some SDKs.
-type SentryLogEntry struct {
-	Formatted string `json:"formatted"`
-	Message   string `json:"message"`
-}
-
-// extractMessage determines the human-readable message from a SentryEvent,
-// checking multiple possible locations where SDKs place it.
-func (ev *SentryEvent) extractMessage() string {
-	if ev.Message != "" {
-		return ev.Message
-	}
-	if ev.Exception != nil && len(ev.Exception.Values) > 0 {
-		exc := ev.Exception.Values[0]
-		if exc.Type != "" && exc.Value != "" {
-			return exc.Type + ": " + exc.Value
-		}
-		if exc.Value != "" {
-			return exc.Value
-		}
-		if exc.Type != "" {
-			return exc.Type
-		}
-	}
-	if ev.LogEntry != nil {
-		if ev.LogEntry.Formatted != "" {
-			return ev.LogEntry.Formatted
-		}
-		return ev.LogEntry.Message
-	}
-	return "(no message)"
-}
-
-// parseSentryEvent unmarshals a JSON blob into a SentryEvent and resolves
-// the message field.
-func parseSentryEvent(data []byte) (SentryEvent, error) {
-	var ev SentryEvent
-	if err := json.Unmarshal(data, &ev); err != nil {
-		return ev, fmt.Errorf("unmarshal event: %w", err)
-	}
-	ev.Message = ev.extractMessage()
-	return ev, nil
-}
-
-// ---------- Envelope Parsing ----------
-
-// parseEnvelope handles the Sentry envelope format (NDJSON) and returns the event ID, item Type, and its raw JSON payload.
-func parseEnvelope(raw []byte) (string, string, []byte, error) {
-	lines := splitEnvelopeLines(raw)
-	if len(lines) == 0 {
-		return "", "", nil, fmt.Errorf("empty envelope")
-	}
-
-	var envelopeHeader struct {
-		EventID string `json:"event_id"`
-	}
-	_ = json.Unmarshal(lines[0], &envelopeHeader)
-
-	for i := 1; i+1 < len(lines); i += 2 {
-		var itemHeader struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(lines[i], &itemHeader); err != nil {
-			continue
-		}
-
-		itemType := strings.ToLower(itemHeader.Type)
-		switch itemType {
-		case "event", "error", "transaction", "":
-			return envelopeHeader.EventID, itemType, lines[i+1], nil
-		default:
-			continue
-		}
-	}
-
-	// Fallback: brute-force — try every line as an event payload.
-	for _, line := range lines[1:] {
-		var partial struct {
-			EventID string `json:"event_id"`
-			Message string `json:"message"`
-		}
-		if err := json.Unmarshal(line, &partial); err == nil && partial.Message != "" {
-			return envelopeHeader.EventID, "event", line, nil
-		}
-	}
-
-	return "", "", nil, fmt.Errorf("no parseable event found in envelope (%d lines)", len(lines))
-}
-
-// splitEnvelopeLines splits envelope bytes by newlines, skipping empty lines.
-func splitEnvelopeLines(data []byte) [][]byte {
-	parts := bytes.Split(data, []byte("\n"))
-	lines := make([][]byte, 0, len(parts))
-	for _, p := range parts {
-		p = bytes.TrimSpace(p)
-		if len(p) > 0 {
-			lines = append(lines, p)
-		}
-	}
-	return lines
-}
-
-// ---------- Helpers ----------
-
-// generateUUID generates a random UUID v4 formatted as 32 hex characters
-// (no dashes), which is the format Sentry uses for event IDs.
-func generateUUID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
-	return fmt.Sprintf("%08x%04x%04x%04x%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
-// truncate shortens a string to at most n characters, appending "…" if cut.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
-
-// ---------- Middleware ----------
-
-// corsMiddleware sets permissive CORS headers so browser-based Sentry SDKs
-// can communicate freely.
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// gzipDecodeMiddleware transparently decompresses gzip-encoded request bodies.
-func gzipDecodeMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Content-Encoding") == "gzip" {
-			gz, err := gzip.NewReader(r.Body)
-			if err != nil {
-				http.Error(w, "failed to decode gzip body", http.StatusBadRequest)
-				return
-			}
-			defer gz.Close()
-			r.Body = gz
-			r.Header.Del("Content-Encoding")
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// Global auth and webhook credentials (set from CLI flags in main).
-var (
-	adminUser         string
-	adminPass         string
-	discordWebhookURL   string
-	tgToken             string
-	tgChatID            string
-	startTime           time.Time
-	globalRetentionDays int
-)
-
-// basicAuthMiddleware protects UI routes with HTTP Basic Authentication.
-// If adminUser and adminPass are both empty, it passes requests through.
-func basicAuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if adminUser == "" && adminPass == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != adminUser || pass != adminPass {
-			w.Header().Set("WWW-Authenticate", `Basic realm="PocketSentry"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// ---------- Webhooks ----------
-
-// evaluateAndTriggerWebhooks evaluates smart alerting rules before triggering.
-// If any rule matches, it sends to the rule's specific targets. If no rule matches,
-// it falls back to the default project/global webhooks ONLY IF shouldNotify is true
-// (which means it's a new or reopened event).
-func evaluateAndTriggerWebhooks(ev SentryEvent, projectID string, shouldNotify bool) {
-	// First, fetch all enabled alerting rules for this project.
-	rows, err := db.Query("SELECT environment, min_count, time_window_minutes, target_discord, target_telegram_token, target_telegram_chat_id FROM alerting_rules WHERE project_id = ? AND enabled = 1", projectID)
-	if err == nil {
-		defer rows.Close()
-		var env string
-		var minCount, timeWindow int
-		var tDiscord, tTGToken, tTGChatID string
-		
-		ruleMatched := false
-
-		for rows.Next() {
-			if err := rows.Scan(&env, &minCount, &timeWindow, &tDiscord, &tTGToken, &tTGChatID); err != nil {
-				continue
-			}
-
-			// Check environment match
-			if env != "" && ev.Environment != env && ev.Environment != "" {
-				continue
-			}
-
-			// Check rate limit threshold
-			countMatched := true
-			if minCount > 1 && timeWindow > 0 {
-				// We need to count occurrences in the transactions/events tables, but we don't store individual occurrences
-				// cleanly if they are deduplicated. However, we can check the total `count` from the `events` table
-				// and assume it's rising, or we just look at the current total count if timeWindow logic is too complex for now.
-				// Since we just updated the event, we can check its current count.
-				// For a true rolling window, we'd need an `occurrences` log table. Let's simplify: if the event count is exactly the minCount, we fire.
-				// Actually, to make it simple and effective: trigger if the event's count % minCount == 0.
-				var currentCount int
-				err := db.QueryRow("SELECT count FROM events WHERE project_id = ? AND message = ? AND level = ?", projectID, ev.Message, ev.Level).Scan(&currentCount)
-				if err != nil || currentCount < minCount || currentCount%minCount != 0 {
-					countMatched = false
-				}
-			}
-
-			if countMatched {
-				// We found a matching rule! Trigger its specific webhooks.
-				ruleMatched = true
-				msg := fmt.Sprintf("🚨 **PocketSentry Smart Alert**\n\n**Project:** %s\n**Level:** %s\n**Message:** %s\n**Time:** %s",
-					projectID, ev.Level, truncate(ev.Message, 150), time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
-				
-				if tDiscord != "" {
-					go sendDiscordWebhook(tDiscord, msg)
-				}
-				if tTGToken != "" && tTGChatID != "" {
-					go sendTelegramWebhook(tTGToken, tTGChatID, msg, ev.EventID)
-				}
-			}
-		}
-
-		if ruleMatched {
-			// If a specific rule fired, we don't fire the default fallback.
-			return
-		}
-	}
-
-	// No rules matched. Fallback to default if shouldNotify is true.
-	if shouldNotify {
-		triggerWebhooks(ev, projectID)
-	}
-}
-
-// triggerWebhooks sends a notification to configured default webhooks.
-func triggerWebhooks(ev SentryEvent, projectID string) {
-	// Format the message
-	msg := fmt.Sprintf("🚨 **PocketSentry Alert**\n\n**Project:** %s\n**Level:** %s\n**Message:** %s\n**Time:** %s",
-		projectID, ev.Level, truncate(ev.Message, 150), time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
-
-	// Default webhook targets
-	targetDiscord := discordWebhookURL
-	targetTGToken := tgToken
-	targetTGChatID := tgChatID
-
-	// Check if this project has webhook overrides
-	var pTGToken, pTGChatID, pDiscordWebhook string
-	err := db.QueryRow("SELECT COALESCE(tg_token, ''), COALESCE(tg_chat_id, ''), COALESCE(discord_webhook, '') FROM projects WHERE id = ?", projectID).Scan(&pTGToken, &pTGChatID, &pDiscordWebhook)
-	if err == nil {
-		if pDiscordWebhook != "" {
-			targetDiscord = pDiscordWebhook
-		}
-		if pTGToken != "" && pTGChatID != "" {
-			targetTGToken = pTGToken
-			targetTGChatID = pTGChatID
-		}
-	}
-
-	// Discord
-	if targetDiscord != "" {
-		go sendDiscordWebhook(targetDiscord, msg)
-	}
-
-	// Telegram
-	if targetTGToken != "" && targetTGChatID != "" {
-		go sendTelegramWebhook(targetTGToken, targetTGChatID, msg, ev.EventID)
-	}
-}
-
-func sendDiscordWebhook(url, content string) {
-	payload, _ := json.Marshal(map[string]string{"content": content})
-	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
-	if err != nil {
-		log.Printf("[discord] webhook error: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		log.Printf("[discord] webhook returned status %d", resp.StatusCode)
-	}
-}
-
-func sendTelegramWebhook(token, chatID, content, eventID string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	
-	payloadData := map[string]interface{}{
-		"chat_id":    chatID,
-		"text":       content,
-		"parse_mode": "Markdown",
-	}
-
-	if eventID != "" {
-		payloadData["reply_markup"] = map[string]interface{}{
-			"inline_keyboard": [][]map[string]interface{}{
-				{
-					{
-						"text":          "✅ Resolve",
-						"callback_data": "resolve_" + eventID,
-					},
-				},
-			},
-		}
-	}
-
-	payload, _ := json.Marshal(payloadData)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
-	if err != nil {
-		log.Printf("[telegram] webhook error: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		log.Printf("[telegram] webhook returned status %d", resp.StatusCode)
-	}
-}
-
-// ---------- Telegram Bot Polling ----------
-
-var (
-	activePollers = make(map[string]bool)
-	pollerMutex   sync.Mutex
-)
-
-func ensureTelegramPollers() {
-	for {
-		tokens := make(map[string]bool)
-		if tgToken != "" {
-			tokens[tgToken] = true
-		}
-
-		rows, err := db.Query("SELECT DISTINCT tg_token FROM projects WHERE tg_token IS NOT NULL AND tg_token != ''")
-		if err == nil {
-			for rows.Next() {
-				var t string
-				if err := rows.Scan(&t); err == nil {
-					tokens[t] = true
-				}
-			}
-			rows.Close()
-		}
-
-		pollerMutex.Lock()
-		for t := range tokens {
-			if !activePollers[t] {
-				activePollers[t] = true
-				go runTelegramPoller(t)
-			}
-		}
-		pollerMutex.Unlock()
-
-		time.Sleep(1 * time.Minute)
-	}
-}
-
-func runTelegramPoller(token string) {
-	offset := 0
-	log.Printf("[telegram] started polling for bot token: %s...", token[:5])
-
-	for {
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30", token, offset)
-		resp, err := http.Get(url)
-		if err != nil {
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		var updateRes struct {
-			Ok     bool `json:"ok"`
-			Result []struct {
-				UpdateID      int `json:"update_id"`
-				CallbackQuery struct {
-					ID      string `json:"id"`
-					Message struct {
-						MessageID int `json:"message_id"`
-						Chat      struct {
-							ID int64 `json:"id"`
-						} `json:"chat"`
-						Text string `json:"text"`
-					} `json:"message"`
-					Data string `json:"data"`
-					From struct {
-						FirstName string `json:"first_name"`
-					} `json:"from"`
-				} `json:"callback_query"`
-			} `json:"result"`
-		}
-
-		err = json.NewDecoder(resp.Body).Decode(&updateRes)
-		resp.Body.Close()
-		if err != nil || !updateRes.Ok {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		for _, u := range updateRes.Result {
-			if u.UpdateID >= offset {
-				offset = u.UpdateID + 1
-			}
-
-			cb := u.CallbackQuery
-			if strings.HasPrefix(cb.Data, "resolve_") {
-				eventID := strings.TrimPrefix(cb.Data, "resolve_")
-				
-				// Resolve event in DB
-				_, _ = db.Exec("UPDATE events SET status = 'resolved' WHERE id = ?", eventID)
-
-				// Answer callback (removes loading state from button)
-				ansURL := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery?callback_query_id=%s&text=Event%%20Resolved!", token, cb.ID)
-				_, _ = http.Get(ansURL)
-
-				// Edit message to remove button and append resolved info
-				newText := cb.Message.Text + fmt.Sprintf("\n\n✅ *Resolved by %s*", cb.From.FirstName)
-				editURL := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", token)
-				
-				payload, _ := json.Marshal(map[string]interface{}{
-					"chat_id":    cb.Message.Chat.ID,
-					"message_id": cb.Message.MessageID,
-					"text":       newText,
-				})
-				http.Post(editURL, "application/json", bytes.NewReader(payload))
-			}
-		}
-	}
-}
-
 // ---------- Handlers ----------
-
-// Project represents a user project.
-type Project struct {
-	ID             string
-	Name           string
-	TGToken        string
-	TGChatID       string
-	DiscordWebhook string
-}
-
-// IndexData is passed to the index.html template.
-type IndexData struct {
-	UnresolvedCount int
-	Webhooks        string
-	Retention       string
-	Projects        []Project
-	Environments    []string
-}
 
 // indexHandler serves the main dashboard page.
 func indexHandler(w http.ResponseWriter, r *http.Request) {
@@ -1698,10 +881,10 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	_ = db.QueryRow("SELECT COUNT(*) FROM events WHERE status = 'unresolved'").Scan(&count)
 
 	var hooks []string
-	if tgToken != "" {
+	if notify.TgToken != "" {
 		hooks = append(hooks, "Telegram")
 	}
-	if discordWebhookURL != "" {
+	if notify.DiscordWebhookURL != "" {
 		hooks = append(hooks, "Discord")
 	}
 	webhooks := "None"
@@ -1714,12 +897,12 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		retention = fmt.Sprintf("%d days", globalRetentionDays)
 	}
 
-	var projects []Project
+	var projects []models.Project
 	rows, err := db.Query("SELECT id, name, COALESCE(tg_token, ''), COALESCE(tg_chat_id, ''), COALESCE(discord_webhook, '') FROM projects ORDER BY id ASC")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var p Project
+			var p models.Project
 			if err := rows.Scan(&p.ID, &p.Name, &p.TGToken, &p.TGChatID, &p.DiscordWebhook); err == nil {
 				projects = append(projects, p)
 			}
@@ -1728,7 +911,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 	envs, _ := queryEnvironments()
 
-	data := IndexData{
+	data := models.IndexData{
 		UnresolvedCount: count,
 		Webhooks:        webhooks,
 		Retention:       retention,
@@ -1747,11 +930,11 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	search := r.URL.Query().Get("search")
 	project := r.URL.Query().Get("project")
 	env := r.URL.Query().Get("environment")
-	
+
 	events, err := queryEvents(50, level, search, project, env)
 	if err != nil {
 		log.Printf("query events: %v", err)
-		events = []EventRow{}
+		events = []models.EventRow{}
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1804,7 +987,7 @@ func storeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ev, err := parseSentryEvent(body)
+	ev, err := sentry.ParseSentryEvent(body)
 	if err != nil {
 		log.Printf("[store] parse error: %v", err)
 		respondOK(w)
@@ -1827,7 +1010,7 @@ func envelopeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	eventID, itemType, rawJSON, err := parseEnvelope(body)
+	eventID, itemType, rawJSON, err := sentry.ParseEnvelope(body)
 	if err != nil {
 		log.Printf("[envelope] parse error: %v", err)
 		respondOK(w)
@@ -1835,7 +1018,7 @@ func envelopeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if itemType == "transaction" {
-		var tx SentryTransaction
+		var tx models.SentryTransaction
 		if err := json.Unmarshal(rawJSON, &tx); err == nil {
 			if tx.EventID == "" {
 				tx.EventID = eventID
@@ -1845,7 +1028,7 @@ func envelopeHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		ev, err := parseSentryEvent(rawJSON)
+		ev, err := sentry.ParseSentryEvent(rawJSON)
 		if err == nil {
 			if ev.EventID == "" {
 				ev.EventID = eventID
@@ -1856,19 +1039,17 @@ func envelopeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Process attachments and replays from envelope
 	extractAndSaveAttachments(body, eventID)
 	extractAndSaveReplays(body, eventID)
 
 	respondWithID(w, eventID)
 }
 
-// extractAndSaveAttachments scans an envelope for attachment items and saves them.
 func extractAndSaveAttachments(envelopeData []byte, eventID string) {
 	if eventID == "" {
 		return
 	}
-	lines := splitEnvelopeLines(envelopeData)
+	lines := sentry.SplitEnvelopeLines(envelopeData)
 	for i := 1; i+1 < len(lines); i += 2 {
 		var itemHeader struct {
 			Type        string `json:"type"`
@@ -1894,9 +1075,8 @@ func extractAndSaveAttachments(envelopeData []byte, eventID string) {
 	}
 }
 
-// extractAndSaveReplays scans an envelope for replay items and saves them.
 func extractAndSaveReplays(envelopeData []byte, eventID string) {
-	lines := splitEnvelopeLines(envelopeData)
+	lines := sentry.SplitEnvelopeLines(envelopeData)
 	for i := 1; i+1 < len(lines); i += 2 {
 		var itemHeader struct {
 			Type     string `json:"type"`
@@ -1935,10 +1115,13 @@ func performanceHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("query transaction groups error: %v", err)
 	}
 
-	tmpl, err := template.ParseFiles(filepath.Join("templates", "performance.html"))
+	tmpl, err := template.ParseFS(templateFS, "templates/performance.html")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		tmpl, err = template.ParseFiles(filepath.Join("templates", "performance.html"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	_ = tmpl.Execute(w, map[string]interface{}{
 		"Groups": groups,
@@ -1979,12 +1162,18 @@ func latencyAnalyticsHandler(w http.ResponseWriter, r *http.Request) {
 	for bucket, durations := range buckets {
 		sort.Float64s(durations)
 		count := len(durations)
-		
+
 		getPercentile := func(p float64) float64 {
-			if count == 0 { return 0 }
+			if count == 0 {
+				return 0
+			}
 			idx := int(math.Ceil(float64(count)*p)) - 1
-			if idx < 0 { idx = 0 }
-			if idx >= count { idx = count - 1 }
+			if idx < 0 {
+				idx = 0
+			}
+			if idx >= count {
+				idx = count - 1
+			}
 			return durations[idx]
 		}
 
@@ -1997,7 +1186,6 @@ func latencyAnalyticsHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Sort results by bucket time ASC
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Bucket < results[j].Bucket
 	})
@@ -2037,14 +1225,22 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 	var traceSpans []TraceSpan
 	for _, s := range rawSpans {
 		offsetMs := s.StartTimestamp.Sub(txStart).Seconds() * 1000.0
-		if offsetMs < 0 { offsetMs = 0 }
-		
+		if offsetMs < 0 {
+			offsetMs = 0
+		}
+
 		leftPct := (offsetMs / txDur) * 100.0
-		if leftPct > 100 { leftPct = 100 }
-		
+		if leftPct > 100 {
+			leftPct = 100
+		}
+
 		widthPct := (s.DurationMs / txDur) * 100.0
-		if leftPct + widthPct > 100 { widthPct = 100 - leftPct }
-		if widthPct < 0.5 { widthPct = 0.5 } // Ensure it's at least visible
+		if leftPct+widthPct > 100 {
+			widthPct = 100 - leftPct
+		}
+		if widthPct < 0.5 {
+			widthPct = 0.5
+		}
 
 		traceSpans = append(traceSpans, TraceSpan{
 			Op:          s.Op,
@@ -2055,12 +1251,15 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	tmpl, err := template.ParseFiles(filepath.Join("templates", "trace.html"))
+	tmpl, err := template.ParseFS(templateFS, "templates/trace.html")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		tmpl, err = template.ParseFiles(filepath.Join("templates", "trace.html"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
-	
+
 	_ = tmpl.Execute(w, map[string]interface{}{
 		"ID":         id,
 		"Name":       txName,
@@ -2069,21 +1268,18 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// extractProjectID pulls the project ID from a URL path.
 func extractProjectID(path, suffix string) string {
 	path = strings.TrimSuffix(path, suffix)
 	path = strings.TrimPrefix(path, "/api/")
 	return path
 }
 
-// respondOK sends a 200 with a freshly generated event ID.
 func respondOK(w http.ResponseWriter) {
-	respondWithID(w, generateUUID())
+	respondWithID(w, helpers.GenerateUUID())
 }
 
 // eventDetailHandler serves the detail page for a single event.
 func eventDetailHandler(w http.ResponseWriter, r *http.Request) {
-	// Extract event ID from /events/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/events/")
 	id = strings.TrimSuffix(id, "/")
 	if id == "" {
@@ -2117,14 +1313,14 @@ func postCommentHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	
+
 	comment := strings.TrimSpace(r.FormValue("comment"))
 	if comment == "" {
 		http.Error(w, "empty comment", http.StatusBadRequest)
 		return
 	}
 
-	author := "Admin" // We could parse from session later
+	author := "Admin"
 	ts := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := db.Exec("INSERT INTO event_comments (event_id, comment, timestamp, author) VALUES (?, ?, ?, ?)", id, comment, ts, author)
@@ -2134,8 +1330,6 @@ func postCommentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Just trigger a page reload via HTMX header to show the new comment,
-	// or return the new comment snippet. Since detail.html doesn't have a partial for just comments yet, HX-Refresh is easiest.
 	w.Header().Set("HX-Refresh", "true")
 	w.WriteHeader(http.StatusOK)
 }
@@ -2318,7 +1512,6 @@ func groupingRulesHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "pattern is required", http.StatusBadRequest)
 			return
 		}
-		// Validate regex
 		if _, err := regexp.Compile(pattern); err != nil {
 			http.Error(w, "invalid regex: "+err.Error(), http.StatusBadRequest)
 			return
@@ -2337,7 +1530,6 @@ func groupingRulesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// If HTMX request, refresh page
 		if r.Header.Get("HX-Request") == "true" {
 			w.Header().Set("HX-Refresh", "true")
 			w.WriteHeader(http.StatusOK)
@@ -2347,213 +1539,6 @@ func groupingRulesHandler(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// resolveProcessName attempts to find the command line name for a given PID.
-// ---------- Docker / K8s Container Resolution ----------
-
-// containerNameCache caches PID→container name and IP→container name lookups.
-var containerNameCache sync.Map // key: string (pid:N or ip:X.X.X.X) → value: string
-
-// resolveProcessName resolves a PID to a human-readable name.
-// Priority: Docker container name → K8s pod name → process binary name → PID:N.
-func resolveProcessName(pid uint32) string {
-	cacheKey := fmt.Sprintf("pid:%d", pid)
-	if v, ok := containerNameCache.Load(cacheKey); ok {
-		return v.(string)
-	}
-
-	name := resolveProcessNameUncached(pid)
-	containerNameCache.Store(cacheKey, name)
-	return name
-}
-
-func resolveProcessNameUncached(pid uint32) string {
-	// 1. Try to detect Docker/K8s via /proc/{pid}/cgroup
-	cgroupPath := fmt.Sprintf("/proc/%d/cgroup", pid)
-	cgData, err := os.ReadFile(cgroupPath)
-	if err == nil {
-		containerID, podUID := parseCgroupForContainer(string(cgData))
-		if containerID != "" {
-			// Try Docker API to resolve container name
-			if name := queryDockerContainerName(containerID); name != "" {
-				if podUID != "" {
-					return fmt.Sprintf("🐳 %s (pod:%s)", name, podUID[:8])
-				}
-				return "🐳 " + name
-			}
-			// Fallback: short container ID
-			short := containerID
-			if len(short) > 12 {
-				short = short[:12]
-			}
-			if podUID != "" {
-				return fmt.Sprintf("☸ pod:%s/%s", podUID[:8], short)
-			}
-			return "🐳 " + short
-		}
-	}
-
-	// 2. Fallback to process cmdline
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return fmt.Sprintf("PID:%d", pid)
-	}
-	parts := bytes.Split(b, []byte{0})
-	if len(parts) > 0 && len(parts[0]) > 0 {
-		return filepath.Base(string(parts[0]))
-	}
-	return fmt.Sprintf("PID:%d", pid)
-}
-
-// resolveIPToContainer tries to resolve a destination IP to a Docker container name.
-func resolveIPToContainer(ip string) string {
-	cacheKey := "ip:" + ip
-	if v, ok := containerNameCache.Load(cacheKey); ok {
-		return v.(string)
-	}
-
-	name := queryDockerContainerByIP(ip)
-	if name == "" {
-		name = ip // fallback to raw IP
-	} else {
-		name = "🐳 " + name
-	}
-	containerNameCache.Store(cacheKey, name)
-	return name
-}
-
-// parseCgroupForContainer extracts Docker container ID and K8s pod UID from cgroup data.
-func parseCgroupForContainer(cgroupData string) (containerID, podUID string) {
-	for _, line := range strings.Split(cgroupData, "\n") {
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		path := parts[2]
-
-		// Docker: .../docker/<container_id> or .../containerd/<container_id>
-		for _, prefix := range []string{"/docker/", "/containerd/", "/cri-containerd-"} {
-			if idx := strings.LastIndex(path, prefix); idx != -1 {
-				id := path[idx+len(prefix):]
-				id = strings.TrimSuffix(id, ".scope")
-				if len(id) >= 12 {
-					containerID = id
-				}
-			}
-		}
-
-		// K8s: .../kubepods/.../pod<uid>/...
-		if strings.Contains(path, "kubepods") {
-			re := regexp.MustCompile(`pod([0-9a-f-]{36})`)
-			if m := re.FindStringSubmatch(path); len(m) > 1 {
-				podUID = m[1]
-			}
-		}
-	}
-	return
-}
-
-// queryDockerContainerName calls the Docker Engine API via Unix socket to get a container's name.
-func queryDockerContainerName(containerID string) string {
-	// Trim to first 12 chars if needed (Docker accepts prefix)
-	short := containerID
-	if len(short) > 12 {
-		short = short[:12]
-	}
-
-	conn, err := net.Dial("unix", "/var/run/docker.sock")
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-
-	req := fmt.Sprintf("GET /containers/%s/json HTTP/1.0\r\nHost: localhost\r\n\r\n", short)
-	conn.SetDeadline(time.Now().Add(2 * time.Second))
-	_, err = conn.Write([]byte(req))
-	if err != nil {
-		return ""
-	}
-
-	body, err := io.ReadAll(conn)
-	if err != nil {
-		return ""
-	}
-
-	// Skip HTTP headers
-	headerEnd := bytes.Index(body, []byte("\r\n\r\n"))
-	if headerEnd == -1 {
-		return ""
-	}
-	jsonBody := body[headerEnd+4:]
-
-	var info struct {
-		Name string `json:"Name"`
-	}
-	if err := json.Unmarshal(jsonBody, &info); err != nil {
-		return ""
-	}
-
-	return strings.TrimPrefix(info.Name, "/")
-}
-
-// queryDockerContainerByIP inspects Docker networks to find a container by IP.
-func queryDockerContainerByIP(ip string) string {
-	conn, err := net.Dial("unix", "/var/run/docker.sock")
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-
-	req := "GET /containers/json HTTP/1.0\r\nHost: localhost\r\n\r\n"
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
-	_, err = conn.Write([]byte(req))
-	if err != nil {
-		return ""
-	}
-
-	body, err := io.ReadAll(conn)
-	if err != nil {
-		return ""
-	}
-
-	headerEnd := bytes.Index(body, []byte("\r\n\r\n"))
-	if headerEnd == -1 {
-		return ""
-	}
-	jsonBody := body[headerEnd+4:]
-
-	var containers []struct {
-		Names           []string `json:"Names"`
-		NetworkSettings struct {
-			Networks map[string]struct {
-				IPAddress string `json:"IPAddress"`
-			} `json:"Networks"`
-		} `json:"NetworkSettings"`
-	}
-	if err := json.Unmarshal(jsonBody, &containers); err != nil {
-		return ""
-	}
-
-	for _, c := range containers {
-		for _, n := range c.NetworkSettings.Networks {
-			if n.IPAddress == ip && len(c.Names) > 0 {
-				return strings.TrimPrefix(c.Names[0], "/")
-			}
-		}
-	}
-	return ""
-}
-
-// flushContainerCache periodically clears the container name cache so stale entries are refreshed.
-func flushContainerCache() {
-	for {
-		time.Sleep(60 * time.Second)
-		containerNameCache.Range(func(key, value any) bool {
-			containerNameCache.Delete(key)
-			return true
-		})
 	}
 }
 
@@ -2597,35 +1582,83 @@ func topologyHandler(w http.ResponseWriter, r *http.Request) {
 // topologyViewHandler renders the topology tab content.
 func topologyViewHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl, err := template.ParseFiles(filepath.Join("templates", "topology.html"))
+	tmpl, err := template.ParseFS(templateFS, "templates/topology.html")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		tmpl, err = template.ParseFiles(filepath.Join("templates", "topology.html"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	_ = tmpl.Execute(w, nil)
 }
 
-// ---------- Log Aggregation ----------
+// ---------- Log Streaming & Alerting ----------
 
-// LogEntry represents a single log line for ingestion.
-type LogEntry struct {
-	ProjectID string            `json:"project_id"`
-	Source    string            `json:"source"`
-	Level    string            `json:"level"`
-	Message  string            `json:"message"`
-	Metadata map[string]string `json:"metadata,omitempty"`
-	Timestamp string           `json:"timestamp,omitempty"`
+type logSubscriber struct {
+	ch        chan models.LogRow
+	projectID string
+	level     string
 }
 
-// LogRow represents a single log line from the DB.
-type LogRow struct {
-	ID        int    `json:"id"`
-	ProjectID string `json:"project_id"`
-	Source    string `json:"source"`
-	Level    string `json:"level"`
-	Message  string `json:"message"`
-	Metadata string `json:"metadata"`
-	Timestamp string `json:"timestamp"`
+var (
+	logSubscribers   = make(map[*logSubscriber]struct{})
+	logSubscribersMu sync.RWMutex
+)
+
+func broadcastLog(logRow models.LogRow) {
+	logSubscribersMu.RLock()
+	defer logSubscribersMu.RUnlock()
+
+	for sub := range logSubscribers {
+		if sub.projectID != "" && sub.projectID != "All" && sub.projectID != logRow.ProjectID {
+			continue
+		}
+		if sub.level != "" && sub.level != "All" && !strings.EqualFold(sub.level, logRow.Level) {
+			continue
+		}
+		select {
+		case sub.ch <- logRow:
+		default:
+		}
+	}
+}
+
+func evaluateAndTriggerLogAlerts(entry models.LogEntry) {
+	rows, err := db.Query(
+		`SELECT level, pattern, target_discord, target_telegram_token, target_telegram_chat_id
+		 FROM log_alerting_rules
+		 WHERE enabled = 1 AND (project_id = '' OR project_id = ?)`, entry.ProjectID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var reqLevel, pattern, tDiscord, tTGToken, tTGChatID string
+		if err := rows.Scan(&reqLevel, &pattern, &tDiscord, &tTGToken, &tTGChatID); err != nil {
+			continue
+		}
+		if reqLevel != "" && !strings.EqualFold(reqLevel, entry.Level) {
+			continue
+		}
+		if pattern != "" {
+			re, err := regexp.Compile(pattern)
+			if err != nil || !re.MatchString(entry.Message) {
+				continue
+			}
+		}
+
+		msg := fmt.Sprintf("🪵 **PocketSentry Log Alert**\n\n**Project:** %s\n**Level:** %s\n**Source:** %s\n**Message:** %s\n**Time:** %s",
+			entry.ProjectID, entry.Level, entry.Source, helpers.Truncate(entry.Message, 200), time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
+
+		if tDiscord != "" {
+			go notify.SendDiscordWebhook(tDiscord, msg)
+		}
+		if tTGToken != "" && tTGChatID != "" {
+			go notify.SendTelegramWebhook(tTGToken, tTGChatID, msg, "")
+		}
+	}
 }
 
 // logsIngestHandler handles POST /api/logs for ingesting log entries.
@@ -2635,7 +1668,6 @@ func logsIngestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit request size to 2 MB to prevent memory exhaustion
 	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -2643,20 +1675,18 @@ func logsIngestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Accept both single entry and array
-	var entries []LogEntry
+	var entries []models.LogEntry
 	if err := json.Unmarshal(body, &entries); err != nil {
-		var single LogEntry
+		var single models.LogEntry
 		if err := json.Unmarshal(body, &single); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		entries = []LogEntry{single}
+		entries = []models.LogEntry{single}
 	}
 
 	count := 0
 	for _, entry := range entries {
-		// Basic validation: skip empty messages or ridiculously long messages
 		if entry.Message == "" || len(entry.Message) > 8192 {
 			continue
 		}
@@ -2676,7 +1706,6 @@ func logsIngestHandler(w http.ResponseWriter, r *http.Request) {
 
 		metaJSON := "{}"
 		if entry.Metadata != nil {
-			// Limit metadata to prevent DB bloat
 			if len(entry.Metadata) > 100 {
 				continue
 			}
@@ -2698,13 +1727,12 @@ func logsIngestHandler(w http.ResponseWriter, r *http.Request) {
 
 		ts := time.Now().UTC().Format(time.RFC3339)
 		if entry.Timestamp != "" {
-			// Basic sanitization/validation of timestamp format (RFC3339-like strings)
 			if len(entry.Timestamp) < 32 {
 				ts = entry.Timestamp
 			}
 		}
 
-		_, err := db.Exec(
+		res, err := db.Exec(
 			`INSERT INTO app_logs (project_id, source, level, message, metadata, timestamp)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
 			entry.ProjectID, entry.Source, entry.Level, entry.Message, metaJSON, ts,
@@ -2713,14 +1741,473 @@ func logsIngestHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[logs] insert error: %v", err)
 			continue
 		}
+
+		var lastID int64
+		if res != nil {
+			lastID, _ = res.LastInsertId()
+		}
+
+		// Broadcast to real-time SSE stream
+		broadcastLog(models.LogRow{
+			ID:        int(lastID),
+			ProjectID: entry.ProjectID,
+			Source:    entry.Source,
+			Level:     entry.Level,
+			Message:   entry.Message,
+			Metadata:  metaJSON,
+			Timestamp: helpers.FormatTimestamp(ts),
+		})
+
+		// Evaluate log alert rules
+		evaluateAndTriggerLogAlerts(entry)
+
 		count++
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":   "ok",
 		"ingested": count,
 	})
+}
+
+// logsStreamHandler handles GET /api/logs/stream for real-time SSE log tailing.
+func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	projectID := r.URL.Query().Get("project")
+	level := r.URL.Query().Get("level")
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	sub := &logSubscriber{
+		ch:        make(chan models.LogRow, 100),
+		projectID: projectID,
+		level:     level,
+	}
+
+	logSubscribersMu.Lock()
+	logSubscribers[sub] = struct{}{}
+	logSubscribersMu.Unlock()
+
+	defer func() {
+		logSubscribersMu.Lock()
+		delete(logSubscribers, sub)
+		logSubscribersMu.Unlock()
+		close(sub.ch)
+	}()
+
+	fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case logRow, ok := <-sub.ch:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(logRow)
+			if err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+// logAlertingRulesHandler handles GET (list) and POST (create) for log alerting rules.
+func logAlertingRulesHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		projectID := r.URL.Query().Get("project_id")
+		rows, err := db.Query("SELECT id, project_id, level, pattern, target_discord, target_telegram_token, target_telegram_chat_id, enabled, created_at FROM log_alerting_rules WHERE (project_id = '' OR project_id = ?) ORDER BY id ASC", projectID)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		var rules []models.LogAlertingRule
+		for rows.Next() {
+			var rule models.LogAlertingRule
+			var enabled int
+			if err := rows.Scan(&rule.ID, &rule.ProjectID, &rule.Level, &rule.Pattern, &rule.TargetDiscord, &rule.TargetTelegramToken, &rule.TargetTelegramChatID, &enabled, &rule.CreatedAt); err == nil {
+				rule.Enabled = enabled == 1
+				rule.CreatedAt = helpers.FormatTimestamp(rule.CreatedAt)
+				rules = append(rules, rule)
+			}
+		}
+		if rules == nil {
+			rules = []models.LogAlertingRule{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(rules)
+
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		projectID := r.FormValue("project_id")
+		level := r.FormValue("level")
+		pattern := strings.TrimSpace(r.FormValue("pattern"))
+		if pattern != "" {
+			if _, err := regexp.Compile(pattern); err != nil {
+				http.Error(w, "invalid regex pattern: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
+		tDiscord := r.FormValue("target_discord")
+		tTGToken := r.FormValue("target_telegram_token")
+		tTGChatID := r.FormValue("target_telegram_chat_id")
+
+		if tDiscord == "" && (tTGToken == "" || tTGChatID == "") {
+			http.Error(w, "at least one webhook target is required", http.StatusBadRequest)
+			return
+		}
+
+		_, err := db.Exec(
+			"INSERT INTO log_alerting_rules (project_id, level, pattern, target_discord, target_telegram_token, target_telegram_chat_id) VALUES (?, ?, ?, ?, ?, ?)",
+			projectID, level, pattern, tDiscord, tTGToken, tTGChatID,
+		)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		if r.Header.Get("HX-Request") == "true" {
+			w.Header().Set("HX-Refresh", "true")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// deleteLogAlertingRuleHandler deletes a specific log alerting rule.
+func deleteLogAlertingRuleHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/log-alerting-rules/delete/")
+	if id == "" {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+	_, err := db.Exec("DELETE FROM log_alerting_rules WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Refresh", "true")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// metricsHandler exports Prometheus format metrics at /metrics.
+func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	m := querySystemMetrics()
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	var b bytes.Buffer
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_uptime_seconds PocketSentry uptime in seconds\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_uptime_seconds gauge\n")
+	fmt.Fprintf(&b, "pocketsentry_uptime_seconds %f\n\n", m.UptimeSeconds)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_events_total Total error events ingested\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_events_total counter\n")
+	fmt.Fprintf(&b, "pocketsentry_events_total %d\n\n", m.TotalEvents)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_events_unresolved Currently unresolved error events\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_events_unresolved gauge\n")
+	fmt.Fprintf(&b, "pocketsentry_events_unresolved %d\n\n", m.UnresolvedEvents)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_events_resolved Currently resolved error events\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_events_resolved gauge\n")
+	fmt.Fprintf(&b, "pocketsentry_events_resolved %d\n\n", m.ResolvedEvents)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_logs_total Total application logs ingested\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_logs_total counter\n")
+	fmt.Fprintf(&b, "pocketsentry_logs_total %d\n\n", m.TotalLogs)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_transactions_total Total performance transactions recorded\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_transactions_total counter\n")
+	fmt.Fprintf(&b, "pocketsentry_transactions_total %d\n\n", m.TotalTransactions)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_db_size_bytes SQLite database file size in bytes\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_db_size_bytes gauge\n")
+	fmt.Fprintf(&b, "pocketsentry_db_size_bytes %d\n\n", m.DBSizeBytes)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_goroutines Number of active goroutines\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_goroutines gauge\n")
+	fmt.Fprintf(&b, "pocketsentry_goroutines %d\n\n", m.GoRoutines)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_mem_alloc_mb Memory allocated by process in MB\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_mem_alloc_mb gauge\n")
+	fmt.Fprintf(&b, "pocketsentry_mem_alloc_mb %f\n\n", m.MemAllocMB)
+
+	fmt.Fprintf(&b, "# HELP pocketsentry_events_per_minute Ingestion rate in events per minute\n")
+	fmt.Fprintf(&b, "# TYPE pocketsentry_events_per_minute gauge\n")
+	fmt.Fprintf(&b, "pocketsentry_events_per_minute %f\n", m.EventsPerMinute)
+
+	w.Write(b.Bytes())
+}
+
+// otlpTracesHandler handles POST /v1/traces (OpenTelemetry Traces JSON).
+func otlpTracesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var payload struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []struct {
+					TraceID           string `json:"traceId"`
+					SpanID            string `json:"spanId"`
+					ParentSpanID      string `json:"parentSpanId"`
+					Name              string `json:"name"`
+					StartTimeUnixNano string `json:"startTimeUnixNano"`
+					EndTimeUnixNano   string `json:"endTimeUnixNano"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	ingested := 0
+	for _, rs := range payload.ResourceSpans {
+		for _, ss := range rs.ScopeSpans {
+			for _, span := range ss.Spans {
+				tx := models.SentryTransaction{
+					EventID:     span.TraceID,
+					Transaction: span.Name,
+				}
+				if tx.EventID == "" {
+					tx.EventID = helpers.GenerateUUID()
+				}
+				_ = saveTransaction(tx, "1", string(body))
+				ingested++
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "ingested": ingested})
+}
+
+// otlpLogsHandler handles POST /v1/logs (OpenTelemetry Logs JSON).
+func otlpLogsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var payload struct {
+		ResourceLogs []struct {
+			ScopeLogs []struct {
+				LogRecords []struct {
+					TimeUnixNano   string          `json:"timeUnixNano"`
+					SeverityText   string          `json:"severityText"`
+					SeverityNumber int             `json:"severityNumber"`
+					Body           json.RawMessage `json:"body"`
+				} `json:"logRecords"`
+			} `json:"scopeLogs"`
+		} `json:"resourceLogs"`
+	}
+
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	ingested := 0
+	for _, rl := range payload.ResourceLogs {
+		for _, sl := range rl.ScopeLogs {
+			for _, lr := range sl.LogRecords {
+				msg := string(lr.Body)
+				var bodyObj struct {
+					StringValue string `json:"stringValue"`
+				}
+				if json.Unmarshal(lr.Body, &bodyObj) == nil && bodyObj.StringValue != "" {
+					msg = bodyObj.StringValue
+				}
+				msg = strings.Trim(msg, `"`)
+
+				level := strings.ToLower(lr.SeverityText)
+				if level == "" {
+					if lr.SeverityNumber >= 17 {
+						level = "fatal"
+					} else if lr.SeverityNumber >= 13 {
+						level = "error"
+					} else if lr.SeverityNumber >= 9 {
+						level = "warning"
+					} else if lr.SeverityNumber >= 5 {
+						level = "info"
+					} else {
+						level = "debug"
+					}
+				}
+
+				entry := models.LogEntry{
+					ProjectID: "1",
+					Source:    "otlp",
+					Level:     level,
+					Message:   msg,
+				}
+
+				ts := time.Now().UTC().Format(time.RFC3339)
+				res, err := db.Exec(
+					`INSERT INTO app_logs (project_id, source, level, message, metadata, timestamp)
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					entry.ProjectID, entry.Source, entry.Level, entry.Message, "{}", ts,
+				)
+				if err == nil {
+					var lastID int64
+					if res != nil {
+						lastID, _ = res.LastInsertId()
+					}
+					broadcastLog(models.LogRow{
+						ID:        int(lastID),
+						ProjectID: entry.ProjectID,
+						Source:    entry.Source,
+						Level:     entry.Level,
+						Message:   entry.Message,
+						Metadata:  "{}",
+						Timestamp: helpers.FormatTimestamp(ts),
+					})
+					evaluateAndTriggerLogAlerts(entry)
+					ingested++
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "ingested": ingested})
+}
+
+// apiKeysHandler handles GET and POST for API Keys.
+func apiKeysHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		projectID := r.URL.Query().Get("project_id")
+		rows, err := db.Query("SELECT id, key, project_id, name, role, created_at FROM api_keys WHERE (project_id = '' OR project_id = ?) ORDER BY id ASC", projectID)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		var keys []models.APIKey
+		for rows.Next() {
+			var k models.APIKey
+			if err := rows.Scan(&k.ID, &k.Key, &k.ProjectID, &k.Name, &k.Role, &k.CreatedAt); err == nil {
+				k.CreatedAt = helpers.FormatTimestamp(k.CreatedAt)
+				keys = append(keys, k)
+			}
+		}
+		if keys == nil {
+			keys = []models.APIKey{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(keys)
+
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		projectID := r.FormValue("project_id")
+		if projectID == "" {
+			projectID = "1"
+		}
+		name := r.FormValue("name")
+		if name == "" {
+			name = "API Key"
+		}
+		role := r.FormValue("role")
+		if role != "admin" {
+			role = "viewer"
+		}
+
+		key := "pk_" + helpers.GenerateUUID()
+		_, err := db.Exec("INSERT INTO api_keys (key, project_id, name, role) VALUES (?, ?, ?, ?)", key, projectID, name, role)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		if r.Header.Get("HX-Request") == "true" {
+			w.Header().Set("HX-Refresh", "true")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "key": key})
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// deleteAPIKeyHandler deletes an API key.
+func deleteAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/api-keys/delete/")
+	if id == "" {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+	_, err := db.Exec("DELETE FROM api_keys WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Refresh", "true")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // logsQueryHandler handles GET /api/logs for querying log entries.
@@ -2773,20 +2260,20 @@ func logsQueryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var logs []LogRow
+	var logs []models.LogRow
 	for rows.Next() {
-		var l LogRow
+		var l models.LogRow
 		if err := rows.Scan(&l.ID, &l.ProjectID, &l.Source, &l.Level, &l.Message, &l.Metadata, &l.Timestamp); err == nil {
-			l.Timestamp = formatTimestamp(l.Timestamp)
+			l.Timestamp = helpers.FormatTimestamp(l.Timestamp)
 			logs = append(logs, l)
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if logs == nil {
-		logs = []LogRow{}
+		logs = []models.LogRow{}
 	}
-	json.NewEncoder(w).Encode(logs)
+	_ = json.NewEncoder(w).Encode(logs)
 }
 
 // logsViewHandler renders the logs tab content.
@@ -2794,7 +2281,6 @@ func logsViewHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	tmpl, err := template.ParseFS(templateFS, "templates/logs.html")
 	if err != nil {
-		// Fallback: try file system for development
 		tmpl, err = template.ParseFiles(filepath.Join("templates", "logs.html"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2811,7 +2297,6 @@ func sourceMapUploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 10MB limit
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
 		http.Error(w, "File too large", http.StatusBadRequest)
 		return
@@ -2857,7 +2342,7 @@ func sourceMapUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 // deleteGroupingRuleHandler deletes a specific grouping rule.
@@ -2886,7 +2371,6 @@ func deleteGroupingRuleHandler(w http.ResponseWriter, r *http.Request) {
 
 // attachmentHandler serves attachment files from disk.
 func attachmentHandler(w http.ResponseWriter, r *http.Request) {
-	// URL: /api/attachments/{event_id}/{filename}
 	path := strings.TrimPrefix(r.URL.Path, "/api/attachments/")
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
@@ -2902,7 +2386,6 @@ func attachmentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Query content type from DB
 	var contentType string
 	err := db.QueryRow("SELECT content_type FROM attachments WHERE event_id = ? AND filename = ?", eventID, filename).Scan(&contentType)
 	if err != nil {
@@ -2913,7 +2396,6 @@ func attachmentHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filePath)
 }
 
-// respondWithID sends a 200 JSON response with the given event ID.
 func respondWithID(w http.ResponseWriter, id string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -2937,7 +2419,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]interface{}{
 		"status":       "ok",
-		"version":      currentVersion,
+		"version":      update.CurrentVersion,
 		"uptime":       uptime,
 		"total_events": count,
 	}
@@ -2946,7 +2428,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// resolveHandler sets an event's status to 'resolved'
+// resolveHandler sets an event's status to 'resolved' or 'snoozed'.
 func resolveHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -2957,7 +2439,7 @@ func resolveHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
-	
+
 	snoozeStr := r.URL.Query().Get("snooze")
 	if snoozeStr != "" {
 		dur, err := time.ParseDuration(snoozeStr)
@@ -2972,11 +2454,11 @@ func resolveHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		
+
 		if strings.Contains(r.Header.Get("HX-Current-Url"), "/events/") {
 			w.Header().Set("Content-Type", "text/html")
 			badge := `<div class="px-3 py-1.5 bg-amber-500/10 text-amber-400 text-xs font-semibold rounded-lg border border-amber-500/20 shadow-sm flex items-center gap-1.5"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0M3.124 7.5A8.969 8.969 0 015.292 3m13.416 0a8.969 8.969 0 012.168 4.5" /></svg> Snoozed (` + snoozeStr + `)</div>`
-			w.Write([]byte(badge))
+			_, _ = w.Write([]byte(badge))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -2988,14 +2470,14 @@ func resolveHandler(w http.ResponseWriter, r *http.Request) {
 	if nextStr == "true" {
 		resolvedIn = "next"
 	}
-	
+
 	_, err := db.Exec("UPDATE events SET status = 'resolved', resolved_in_release = ? WHERE id = ?", resolvedIn, id)
 	if err != nil {
 		log.Printf("resolve error: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	
+
 	if strings.Contains(r.Header.Get("HX-Current-Url"), "/events/") {
 		w.Header().Set("Content-Type", "text/html")
 		var badge string
@@ -3004,7 +2486,7 @@ func resolveHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			badge = `<div class="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 text-xs font-semibold rounded-lg border border-emerald-500/20 shadow-sm flex items-center gap-1.5"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg> Resolved</div>`
 		}
-		w.Write([]byte(badge))
+		_, _ = w.Write([]byte(badge))
 		return
 	}
 
@@ -3048,18 +2530,16 @@ func deleteProjectHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/projects/delete/")
-	if id == "" || id == "1" { // Prevent deleting default project
+	if id == "" || id == "1" {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
-	// Delete events associated with the project
 	_, err := db.Exec("DELETE FROM events WHERE project_id = ?", id)
 	if err != nil {
 		log.Printf("delete project events error: %v", err)
 	}
 
-	// Delete the project itself
 	_, err = db.Exec("DELETE FROM projects WHERE id = ?", id)
 	if err != nil {
 		log.Printf("delete project error: %v", err)
@@ -3082,15 +2562,15 @@ func updateProjectSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tgToken := r.FormValue("tg_token")
-	tgChatID := r.FormValue("tg_chat_id")
+	tgTok := r.FormValue("tg_token")
+	tgChat := r.FormValue("tg_chat_id")
 	discordWebhook := r.FormValue("discord_webhook")
 
 	_, err := db.Exec(`
 		UPDATE projects 
 		SET tg_token = ?, tg_chat_id = ?, discord_webhook = ?
 		WHERE id = ?`,
-		tgToken, tgChatID, discordWebhook, id,
+		tgTok, tgChat, discordWebhook, id,
 	)
 	if err != nil {
 		log.Printf("update project settings error: %v", err)
@@ -3145,20 +2625,20 @@ func newRouter() http.Handler {
 	})
 
 	// Mount protected UI behind auth middleware.
-	mux.Handle("/", basicAuthMiddleware(protected))
-	mux.Handle("/events/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", middleware.BasicAuthMiddleware(protected))
+	mux.Handle("/events/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		protected.ServeHTTP(w, r)
 	})))
-	mux.Handle("/api/events", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/events", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		protected.ServeHTTP(w, r)
 	})))
-	mux.Handle("/api/events/export", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/events/export", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		protected.ServeHTTP(w, r)
 	})))
-	mux.Handle("/api/events/resolve/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/events/resolve/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resolveHandler(w, r)
 	})))
-	mux.Handle("/api/events/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/events/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/comments") && r.Method == http.MethodPost {
 			postCommentHandler(w, r)
 			return
@@ -3166,31 +2646,31 @@ func newRouter() http.Handler {
 		http.NotFound(w, r)
 	})))
 
-	mux.Handle("/api/projects", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/projects", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		createProjectHandler(w, r)
 	})))
 
-	mux.Handle("/api/projects/delete/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/projects/delete/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deleteProjectHandler(w, r)
 	})))
 
-	mux.Handle("/api/projects/update/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/projects/update/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		updateProjectSettingsHandler(w, r)
 	})))
 
-	mux.Handle("/api/topology", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/topology", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		topologyHandler(w, r)
 	})))
 
-	mux.Handle("/api/topology/view", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/topology/view", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		topologyViewHandler(w, r)
 	})))
 
-	mux.Handle("/api/logs", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/logs", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logsQueryHandler(w, r)
 	})))
 
-	mux.Handle("/api/logs/view", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/logs/view", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logsViewHandler(w, r)
 	})))
 
@@ -3198,68 +2678,89 @@ func newRouter() http.Handler {
 		logsIngestHandler(w, r)
 	})
 
-	mux.Handle("/api/performance", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/performance", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		performanceHandler(w, r)
 	})))
 
-	mux.Handle("/api/performance/analytics", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/performance/analytics", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		latencyAnalyticsHandler(w, r)
 	})))
 
-	mux.Handle("/api/performance/trace/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/performance/trace/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		traceHandler(w, r)
 	})))
 
-	mux.Handle("/api/stats", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/stats", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		protected.ServeHTTP(w, r)
 	})))
 
-	mux.Handle("/api/system-metrics", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/system-metrics", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		systemMetricsHandler(w, r)
 	})))
 
-	mux.Handle("/api/alerting-rules", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/alerting-rules", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		alertingRulesHandler(w, r)
 	})))
 
-	mux.Handle("/api/alerting-rules/delete/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/alerting-rules/delete/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deleteAlertingRuleHandler(w, r)
 	})))
 
-	mux.Handle("/api/sourcemaps/upload", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/log-alerting-rules", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logAlertingRulesHandler(w, r)
+	})))
+
+	mux.Handle("/api/log-alerting-rules/delete/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deleteLogAlertingRuleHandler(w, r)
+	})))
+
+	mux.Handle("/api/api-keys", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiKeysHandler(w, r)
+	})))
+
+	mux.Handle("/api/api-keys/delete/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deleteAPIKeyHandler(w, r)
+	})))
+
+	mux.Handle("/api/sourcemaps/upload", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sourceMapUploadHandler(w, r)
 	})))
 
-	mux.Handle("/api/grouping-rules", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/grouping-rules", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		groupingRulesHandler(w, r)
 	})))
 
-	mux.Handle("/api/grouping-rules/delete/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/grouping-rules/delete/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deleteGroupingRuleHandler(w, r)
 	})))
 
-	mux.Handle("/api/attachments/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/attachments/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attachmentHandler(w, r)
 	})))
 
-	mux.Handle("/api/replays/", basicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// URL: /api/replays/{replay_id}
+	mux.Handle("/api/replays/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		replayID := strings.TrimPrefix(r.URL.Path, "/api/replays/")
 		replayID = filepath.Base(replayID)
 		filePath := filepath.Join("data", "replays", replayID+".jsonl")
-		
-		// Set CORS headers so the frontend can fetch it easily if needed
+
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		http.ServeFile(w, r, filePath)
 	})))
 
-	// Public health check endpoint
+	// Public health check and Prometheus metrics endpoints
 	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/metrics", metricsHandler)
+
+	// Real-time SSE log stream endpoint
+	mux.HandleFunc("/api/logs/stream", logsStreamHandler)
+
+	// OpenTelemetry OTLP Ingest endpoints
+	mux.HandleFunc("/v1/traces", otlpTracesHandler)
+	mux.HandleFunc("/v1/logs", otlpLogsHandler)
 
 	// Public ingestion routes — NO auth.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
-		// Exclude UI routes from this handler (handled above with auth).
 		if r.URL.Path == "/api/events" || r.URL.Path == "/api/stats" {
 			return
 		}
@@ -3273,146 +2774,7 @@ func newRouter() http.Handler {
 		}
 	})
 
-	return corsMiddleware(gzipDecodeMiddleware(mux))
-}
-
-// ---------- Self-Update ----------
-
-// githubRelease is a minimal representation of the GitHub Releases API response.
-type githubRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-	} `json:"assets"`
-}
-
-// checkUpdate checks GitHub for a newer release. If one is found it prompts
-// the user to confirm, downloads the new binary, atomically replaces the
-// current executable, and exits so the user can restart with the new version.
-func checkUpdate() {
-	fmt.Println("🔍 Checking for updates...")
-
-	const apiURL = "https://api.github.com/repos/apvcode/pocketsentry/releases/latest"
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, _ := http.NewRequest(http.MethodGet, apiURL, nil)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "pocketsentry-selfupdate/"+currentVersion)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Could not reach GitHub: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to parse GitHub response: %v\n", err)
-		return
-	}
-
-	latest := strings.TrimSpace(release.TagName)
-	if latest == "" {
-		fmt.Println("❌ Could not determine the latest version.")
-		return
-	}
-
-	if latest == currentVersion {
-		fmt.Printf("✅ You are already on the latest version (%s). No update needed.\n", currentVersion)
-		return
-	}
-
-	fmt.Printf("🆕 New version available: %s (current: %s)\n", latest, currentVersion)
-
-	// Determine the asset name for the current platform.
-	// Convention: pocketsentry-linux-amd64, pocketsentry-windows-amd64.exe, etc.
-	assetName := fmt.Sprintf("pocketsentry-%s-%s", runtime.GOOS, runtime.GOARCH)
-	if runtime.GOOS == "windows" {
-		assetName += ".exe"
-	}
-
-	var downloadURL string
-	for _, a := range release.Assets {
-		if a.Name == assetName {
-			downloadURL = a.BrowserDownloadURL
-			break
-		}
-	}
-	if downloadURL == "" {
-		fmt.Printf("⚠️  No pre-built binary found for %s/%s (asset: %s).\n",
-			runtime.GOOS, runtime.GOARCH, assetName)
-		fmt.Printf("   You can build manually: go build -o pocketsentry .\n")
-		return
-	}
-
-	// Ask the user to confirm.
-	fmt.Printf("   Asset : %s\n", assetName)
-	fmt.Printf("   URL   : %s\n", downloadURL)
-	fmt.Print("\n❓ Do you want to update? [y/N]: ")
-
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-	if answer != "y" && answer != "yes" {
-		fmt.Println("⏭️  Update cancelled.")
-		return
-	}
-
-	// Determine path of the currently running executable.
-	exePath, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Cannot determine executable path: %v\n", err)
-		return
-	}
-
-	// Download to a temporary file next to the current binary.
-	tmpPath := exePath + ".update_tmp"
-	fmt.Printf("⬇️  Downloading %s...\n", assetName)
-
-	dlResp, err := client.Get(downloadURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Download failed: %v\n", err)
-		return
-	}
-	defer dlResp.Body.Close()
-
-	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Cannot create temp file %s: %v\n", tmpPath, err)
-		return
-	}
-
-	n, err := io.Copy(tmpFile, dlResp.Body)
-	tmpFile.Close()
-	if err != nil {
-		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "❌ Write failed: %v\n", err)
-		return
-	}
-	fmt.Printf("   Downloaded %.1f MB\n", float64(n)/1024/1024)
-
-	// Atomically replace the running binary.
-	// On Windows we cannot replace a running exe, so we rename ours first.
-	if runtime.GOOS == "windows" {
-		oldPath := exePath + ".old"
-		_ = os.Remove(oldPath)
-		if err := os.Rename(exePath, oldPath); err != nil {
-			os.Remove(tmpPath)
-			fmt.Fprintf(os.Stderr, "❌ Cannot move old binary: %v\n", err)
-			return
-		}
-	}
-
-	if err := os.Rename(tmpPath, exePath); err != nil {
-		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "❌ Cannot replace binary: %v\n", err)
-		return
-	}
-
-	fmt.Printf("✅ Updated to %s successfully!\n", latest)
-	fmt.Println("   Restart PocketSentry to use the new version.")
+	return middleware.CorsMiddleware(middleware.GzipDecodeMiddleware(mux))
 }
 
 // ---------- Banner ----------
@@ -3428,7 +2790,7 @@ const banner = `
 func printBanner(port, dbPath, user string, retDays int) {
 	fmt.Print(banner)
 	fmt.Println("  ──────────────────────────────────────────────────")
-	fmt.Printf("  🛡️  Version     : 3.1.0\n")
+	fmt.Printf("  🛡️  Version     : %s\n", update.CurrentVersion)
 	fmt.Printf("  🌐 Dashboard   : http://localhost:%s\n", port)
 	fmt.Printf("  📦 Database    : %s\n", dbPath)
 	fmt.Printf("  🔗 DSN         : http://public@localhost:%s/1\n", port)
@@ -3444,10 +2806,10 @@ func printBanner(port, dbPath, user string, retDays int) {
 	}
 
 	var notifs []string
-	if discordWebhookURL != "" {
+	if notify.DiscordWebhookURL != "" {
 		notifs = append(notifs, "Discord")
 	}
-	if tgToken != "" && tgChatID != "" {
+	if notify.TgToken != "" && notify.TgChatID != "" {
 		notifs = append(notifs, "Telegram")
 	}
 	if len(notifs) > 0 {
@@ -3468,12 +2830,15 @@ func printBanner(port, dbPath, user string, retDays int) {
 func main() {
 	startTime = time.Now()
 
-	// CLI flags.
 	port := flag.String("port", "8080", "HTTP server port")
 	dbPath := flag.String("db", "pocketsentry.db", "Path to SQLite database file")
 	flagUser := flag.String("admin-user", "", "Dashboard admin username (empty = auth disabled)")
 	flagPass := flag.String("admin-pass", "", "Dashboard admin password")
 	retentionDays := flag.Int("retention-days", 30, "Auto-delete events older than N days (0 = disabled)")
+	logRetentionDays := flag.Int("log-retention-days", 30, "Auto-delete app logs older than N days (0 = disabled)")
+	txRetentionDays := flag.Int("tx-retention-days", 30, "Auto-delete transactions & spans older than N days (0 = disabled)")
+	versionFlag := flag.Bool("version", false, "Print PocketSentry version and exit")
+	versionFlagShort := flag.Bool("v", false, "Print PocketSentry version and exit")
 	checkUpd := flag.Bool("checkupd", false, "Check for a newer release on GitHub and offer to update")
 	flagDiscord := flag.String("discord-webhook-url", "", "Discord Webhook URL for error notifications")
 	flagTgToken := flag.String("tg-token", "", "Telegram Bot Token for error notifications")
@@ -3481,13 +2846,16 @@ func main() {
 	flagEnableEBPF := flag.Bool("enable-ebpf", false, "Enable the eBPF agent for zero-config HTTP 500 tracing (requires root)")
 	flag.Parse()
 
-	// Handle --checkupd before anything else: no server, no DB needed.
-	if *checkUpd {
-		checkUpdate()
+	if *versionFlag || *versionFlagShort {
+		fmt.Printf("PocketSentry %s\n", update.CurrentVersion)
 		return
 	}
 
-	// Override from env vars (flags take priority if explicitly set).
+	if *checkUpd {
+		update.CheckUpdate()
+		return
+	}
+
 	if envPort := os.Getenv("PORT"); envPort != "" && !isFlagPassed("port") {
 		*port = envPort
 	}
@@ -3495,52 +2863,46 @@ func main() {
 		*dbPath = envDB
 	}
 
-	// Set global auth and webhook credentials.
-	adminUser = *flagUser
-	adminPass = *flagPass
-	discordWebhookURL = *flagDiscord
-	tgToken = *flagTgToken
-	tgChatID = *flagTgChatID
+	middleware.AdminUser = *flagUser
+	middleware.AdminPass = *flagPass
+	notify.DiscordWebhookURL = *flagDiscord
+	notify.TgToken = *flagTgToken
+	notify.TgChatID = *flagTgChatID
 	globalRetentionDays = *retentionDays
 
-	// Initialize templates (from embedded FS).
 	if err := initTemplates(); err != nil {
 		log.Fatalf("Template init failed: %v", err)
 	}
 
-	// Initialize database.
 	dbFilePath = *dbPath
 	if err := initDB(*dbPath); err != nil {
 		log.Fatalf("Database init failed: %v", err)
 	}
+	notify.DB = db
 
-	// Print startup banner.
-	printBanner(*port, *dbPath, adminUser, *retentionDays)
+	printBanner(*port, *dbPath, middleware.AdminUser, *retentionDays)
 
-	// Start eBPF Agent if enabled
 	if *flagEnableEBPF {
 		err := ebpf.StartAgent(ebpf.Callbacks{
 			OnHTTP500: func(pid uint32, snippet string) {
 				msg := fmt.Sprintf("Zero-Config Intercept: HTTP 500 error from PID %d\nSnippet: %s", pid, snippet)
-				ev := SentryEvent{
-					EventID:   generateUUID(),
-					Level:     "error",
-					Platform:  "ebpf",
-					Message:   msg,
-					Logger:    "pocketsentry.ebpf",
+				ev := models.SentryEvent{
+					EventID:  helpers.GenerateUUID(),
+					Level:    "error",
+					Platform: "ebpf",
+					Message:  msg,
+					Logger:   "pocketsentry.ebpf",
 				}
 				raw := fmt.Sprintf(`{"message":"%s","level":"error","platform":"ebpf","tags":{"pid":"%d","source":"kernel_intercept"}}`, msg, pid)
 				_ = saveEvent(ev, "1", raw)
 			},
 			OnTCPConn: func(pid uint32, destIP string, destPort uint16) {
-				// Ignore loopback or zero IP to keep map clean
 				if destIP == "127.0.0.1" || destIP == "0.0.0.0" {
 					return
 				}
-				sourceNode := resolveProcessName(pid)
-				targetNode := resolveIPToContainer(destIP)
+				sourceNode := container.ResolveProcessName(pid)
+				targetNode := container.ResolveIPToContainer(destIP)
 
-				// Upsert edge
 				_, err := db.Exec(`
 					INSERT INTO network_edges (source_node, target_node, target_port, hit_count, last_seen)
 					VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
@@ -3556,45 +2918,37 @@ func main() {
 			log.Printf("⚠️  Failed to start eBPF Agent: %v (Are you running as root?)", err)
 		} else {
 			log.Printf("🔥 eBPF Agent running! Monitoring global HTTP traffic for 500s...")
-			go flushContainerCache()
+			go container.FlushContainerCache()
 		}
 	}
 
-	// Create HTTP server.
 	addr := ":" + *port
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: newRouter(),
 	}
 
-	// Graceful shutdown: listen for SIGINT / SIGTERM.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start retention cleanup goroutine.
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	if *retentionDays > 0 {
-		go runRetentionCleanup(cleanupCtx, *retentionDays)
+	if *retentionDays > 0 || *logRetentionDays > 0 || *txRetentionDays > 0 {
+		go runRetentionCleanup(cleanupCtx, *retentionDays, *logRetentionDays, *txRetentionDays)
 	}
 
-	// Start Telegram bot pollers.
-	go ensureTelegramPollers()
+	go notify.EnsureTelegramPollers()
 
-	// Start server in a goroutine.
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
 		}
 	}()
 
-	// Block until we receive a shutdown signal.
 	sig := <-quit
 	log.Printf("Received %v, shutting down gracefully...", sig)
 
-	// Stop the retention worker.
 	cleanupCancel()
 
-	// Give in-flight requests up to 10 seconds to complete.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -3609,21 +2963,55 @@ func main() {
 	log.Println("PocketSentry stopped.")
 }
 
-// runRetentionCleanup periodically deletes events older than retentionDays.
-func runRetentionCleanup(ctx context.Context, days int) {
-	// Run once at startup, then every hour.
+func runRetentionCleanup(ctx context.Context, eventDays, logDays, txDays int) {
 	cleanup := func() {
-		res, err := db.Exec(
-			`DELETE FROM events WHERE
-			 CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END
-			 < datetime('now', '-' || ? || ' days')`, days,
-		)
-		if err != nil {
-			log.Printf("[retention] cleanup error: %v", err)
-			return
+		// 1. Clean events & orphaned attachments
+		if eventDays > 0 {
+			res, err := db.Exec(
+				`DELETE FROM events WHERE
+				 CASE WHEN last_seen = '' THEN timestamp ELSE last_seen END
+				 < datetime('now', '-' || ? || ' days')`, eventDays,
+			)
+			if err != nil {
+				log.Printf("[retention] events cleanup error: %v", err)
+			} else if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("[retention] deleted %d events older than %d days", n, eventDays)
+			}
+
+			// Clean orphaned attachments from DB and disk
+			cleanOrphanedAttachments()
 		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			log.Printf("[retention] deleted %d events older than %d days", n, days)
+
+		// 2. Clean app_logs
+		if logDays > 0 {
+			res, err := db.Exec(
+				`DELETE FROM app_logs WHERE timestamp < datetime('now', '-' || ? || ' days')`, logDays,
+			)
+			if err != nil {
+				log.Printf("[retention] logs cleanup error: %v", err)
+			} else if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("[retention] deleted %d logs older than %d days", n, logDays)
+			}
+		}
+
+		// 3. Clean transactions & spans
+		if txDays > 0 {
+			res, err := db.Exec(
+				`DELETE FROM transactions WHERE timestamp < datetime('now', '-' || ? || ' days')`, txDays,
+			)
+			if err != nil {
+				log.Printf("[retention] transactions cleanup error: %v", err)
+			} else if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("[retention] deleted %d transactions older than %d days", n, txDays)
+			}
+
+			// Clean orphaned spans
+			resSpans, err := db.Exec(`DELETE FROM spans WHERE transaction_id NOT IN (SELECT id FROM transactions)`)
+			if err == nil {
+				if n, _ := resSpans.RowsAffected(); n > 0 {
+					log.Printf("[retention] cleaned %d orphaned spans", n)
+				}
+			}
 		}
 	}
 
@@ -3641,7 +3029,32 @@ func runRetentionCleanup(ctx context.Context, days int) {
 	}
 }
 
-// isFlagPassed checks if a flag was explicitly provided on the command line.
+func cleanOrphanedAttachments() {
+	// Query attachments whose event no longer exists
+	rows, err := db.Query(`SELECT id, event_id FROM attachments WHERE event_id NOT IN (SELECT id FROM events)`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var eventIDs []string
+	for rows.Next() {
+		var attID, evID string
+		if err := rows.Scan(&attID, &evID); err == nil {
+			eventIDs = append(eventIDs, evID)
+		}
+	}
+
+	if len(eventIDs) > 0 {
+		_, _ = db.Exec(`DELETE FROM attachments WHERE event_id NOT IN (SELECT id FROM events)`)
+		for _, evID := range eventIDs {
+			dir := filepath.Join("data", "attachments", evID)
+			_ = os.RemoveAll(dir)
+		}
+		log.Printf("[retention] purged disk files for %d orphaned attachments", len(eventIDs))
+	}
+}
+
 func isFlagPassed(name string) bool {
 	found := false
 	flag.Visit(func(f *flag.Flag) {

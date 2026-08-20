@@ -198,7 +198,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 3.1.0
+  🛡️  Version     : 3.2.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1
@@ -227,19 +227,19 @@ go build -o pocketsentry .
 **General Roadmap:**
 
 - [ ] **⚡ HTTP Latency Auto-Discovery via eBPF**: Measure transaction response times (p50/p90/p99) directly in the Linux kernel without SDKs or changes to application code.
-- [ ] **🔑 Log-based Alerting Rules**: Trigger instant alerts (Telegram/Discord) when specific regex patterns or errors appear in container logs.
-- [ ] **📡 Real-time Log Tail (WebSockets)**: Stream logs to the UI in real-time without page refreshes.
-- [ ] **🗑️ Log Retention & Rotation**: Automated cleanup and retention policies for log tables to keep the SQLite database light.
 - [ ] **🔓 SSL/TLS Decryption via eBPF**: Trace secure HTTPS connections by hooking SSL libraries (OpenSSL/Go TLS) at the kernel level.
 
 <details>
 <summary><strong>✅ Completed Features</strong></summary>
 
+- [x] **📡 Real-time Log Tail (SSE)**: Stream logs to the UI in real-time with Live Tail mode.
+- [x] **🔑 Log-based Alerting Rules**: Instant Telegram/Discord alerts when specific regex patterns appear in logs.
+- [x] **🗑️ Comprehensive Log & Transaction Retention**: Automated cleanup for logs, transactions, spans, attachments, and replays.
+- [x] **🔭 OpenTelemetry OTLP Ingest**: Native endpoints (`/v1/traces`, `/v1/logs`) for direct OpenTelemetry SDK and Collector ingestion.
+- [x] **📈 Prometheus Metrics Endpoint**: Built-in `/metrics` exporter for infrastructure monitoring.
 - [x] **🐳 Docker & Kubernetes eBPF Metadata**: Enrich connection topology with container names and pod namespace info using Docker/k8s APIs.
 - [x] **🪵 Centralized Log Streaming**: Act as a lightweight log aggregator (like Loki) to query stdout/stderr application logs inside the UI.
-
 - [x] **🎥 Session Replay**: Support and visualize user session recordings (sent by Sentry SDK via `rrweb`) to see exactly what the user did before the crash.
-
 - [x] **Linux eBPF Agent**: Catch 500 Internal Server Errors and connection tracking directly from the Linux kernel without SDKs (run with `--enable-ebpf`).
 - [x] **Network Topology Map**: Visual dashboard showing how your Docker containers/services interact.
 - [x] **Smart Alerting Rules**: Conditional routing for webhooks (e.g., notify only if an error occurs > 10 times in 5 minutes).
@@ -449,7 +449,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 3.1.0
+  🛡️  Version     : 3.2.0
   🌐 Dashboard   : http://localhost:9090
   📦 Database    : /data/errors.db
   🔗 DSN         : http://public@localhost:9090/1
@@ -478,19 +478,19 @@ go build -o pocketsentry .
 **Ближайшие планы:**
 
 - [ ] **⚡ Автоматический замер задержек через eBPF**: Измерение времени ответа (p50/p90/p99) транзакций на уровне сетевого стека ядра Linux без SDK.
-- [ ] **🔑 Алерты на основе логов**: Мгновенная отправка алертов в Telegram/Discord при обнаружении критических ошибок или регулярных выражений в логах.
-- [ ] **📡 Живой стриминг логов (WebSockets)**: Динамическое отображение логов на дашборде в реальном времени (tail -f) без перезагрузки.
-- [ ] **🗑️ Автоматическая ротация логов**: Умная политика очистки и сжатия таблиц логов для контроля размера SQLite БД.
 - [ ] **🔓 Расшифровка SSL/TLS трафика через eBPF**: Перехват и трассировка защищенных соединений HTTPS с помощью eBPF uretprobes на OpenSSL и Go TLS.
 
 <details>
 <summary><strong>✅ Выполненные задачи</strong></summary>
 
+- [x] **📡 Живой стриминг логов (SSE)**: Динамическое отображение логов на дашборде в режиме Live Tail в реальном времени.
+- [x] **🔑 Алерты на основе логов**: Мгновенная отправка алертов в Telegram/Discord при обнаружении регулярных выражений или критических событий в логах.
+- [x] **🗑️ Полная ротация и очистка логов/транзакций**: Автоматическое удаление старых логов, транзакций, спанов, вложений и реплеев.
+- [x] **🔭 Поддержка OpenTelemetry OTLP**: Эндпоинты (`/v1/traces`, `/v1/logs`) для прямого приема данных от OTel Collector и SDK.
+- [x] **📈 Prometheus Метрики**: Встроенный эндпоинт `/metrics` для мониторинга состояния PocketSentry.
 - [x] **🐳 eBPF-интеграция с Docker и K8s**: Отображение реальных имен Docker-контейнеров и Kubernetes-подов на карте сети вместо сырых IP/PID.
 - [x] **🪵 Сбор сырых логов (Log Aggregation)**: Полноценный поиск по логам приложений (stdout/stderr) в реальном времени прямо на дашборде.
-
 - [x] **🎥 Воспроизведение сессий (Session Replay)**: Поддержка записей действий пользователей (через `rrweb` в Sentry SDK) с воспроизведением «видео» прямо в деталях ошибки.
-
 - [x] **eBPF Агент (Linux)**: Перехват 500-х HTTP ошибок из ядра Linux без изменения кода приложения (запуск с флагом `--enable-ebpf`).
 - [x] **Карта сети (Topology)**: Визуальный дашборд взаимодействия ваших Docker-контейнеров с подсветкой узких мест.
 - [x] **Умные правила уведомлений**: Настройка условий отправки алертов (например, отправлять уведомление только если ошибка произошла более 10 раз за 5 минут).
