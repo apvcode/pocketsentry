@@ -1,6 +1,7 @@
 module github.com/pocketsentry/pocketsentry
 
-go 1.22
+go 1.23
+
 
 
 require (
