@@ -200,7 +200,7 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  Version     : 3.2.0
+  Version     : 4.0.0
   Dashboard   : http://localhost:9090
   Database    : /data/errors.db
   DSN         : http://public@localhost:9090/1
