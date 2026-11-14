@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛡️ PocketSentry
+# PocketSentry
 
 **The 18 MB drop-in Sentry alternative for indie hackers.**
 
@@ -8,7 +8,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?style=flat-square&logo=sqlite&logoColor=white)](https://www.sqlite.org)
 [![HTMX](https://img.shields.io/badge/HTMX-1.9-3366CC?style=flat-square&logo=htmx&logoColor=white)](https://htmx.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
-[![Single Binary](https://img.shields.io/badge/Deploy-Single%20Binary-blueviolet?style=flat-square)](#-quick-start)
+[![Single Binary](https://img.shields.io/badge/Deploy-Single%20Binary-blueviolet?style=flat-square)](#quick-start)
 
 <br>
 
@@ -18,31 +18,29 @@
 
 *Your Sentry SDKs keep working. Your server bill doesn't.*
 
+Read this in: [English](#english) | [Русский](README_RU.md)
+
 </div>
 
 <br>
 
-🌍 Read in: [🇬🇧 English](#english) | [🇷🇺 Русский](#русский)
-
----
-
 <a id="english"></a>
 
-## 🇬🇧 English
+## English
 
-### 🔥 The Problem
+### The Problem
 
 Self-hosting [Sentry](https://sentry.io) is an **infrastructure nightmare**:
 
 | What you need | What it costs |
 |---|---|
 | 40+ Docker containers | Hours of DevOps work |
-| Kafka, Redis, ClickHouse, PostgreSQL, Zookeeper… | 16 GB+ RAM minimum |
+| Kafka, Redis, ClickHouse, PostgreSQL, Zookeeper... | 16 GB+ RAM minimum |
 | `docker-compose.yml` from hell | Constant maintenance |
 
 You just wanted to catch a `TypeError` in your side project. Not deploy a distributed system.
 
-### 💡 The Solution
+### The Solution
 
 **PocketSentry** is a single, self-contained binary that speaks the Sentry protocol. Your existing SDKs (`sentry-python`, `@sentry/browser`, `sentry-go`, etc.) connect to it without any code changes — just swap the DSN.
 
@@ -52,41 +50,41 @@ You just wanted to catch a `TypeError` in your side project. Not deploy a distri
 | **RAM** | 16 GB+ | **< 20 MB** |
 | **Database** | PostgreSQL + ClickHouse + Redis | **SQLite (WAL mode + Deduplication)** |
 | **Binary size** | Gigabytes of images | **~18 MB** |
-| **Dependencies** | Kafka, Zookeeper, Snuba… | **Zero** |
+| **Dependencies** | Kafka, Zookeeper, Snuba... | **Zero** |
 | **Time to deploy** | 30+ minutes | **3 seconds** |
 | **CGO** | N/A | **None — pure Go** |
 
-### ✨ Features
+### Features
 
-- 🔌 **Drop-in compatible** — works with official Sentry SDKs out of the box
-- 📦 **Single binary** — templates embedded via `go:embed`, zero external files
-- 🪶 **Ultra-lightweight** — ~18 MB binary, < 20 MB RAM at runtime
-- 🗄️ **Embedded SQLite** — pure-Go driver ([modernc.org/sqlite](https://modernc.org/sqlite)), no CGO hassle
-- 🔄 **Auto-deduplication** — identical errors are grouped by `(project, message, level)` with a hit counter
-- 📊 **Real-time dashboard** — dark-themed UI with HTMX auto-refresh (every 2s)
-- 🔍 **Detailed Stacktraces** — Clickable rows to view full error details and raw JSON payloads
-- 📈 **Analytics & Filters** — Interactive charts and instant HTMX filtering by error level
-- 🛡️ **Basic Auth** — Built-in dashboard protection via username and password (ingestion API remains open)
-- 🧹 **Retention Policy** — Background auto-cleanup of old events from the database
-- 🔒 **Graceful shutdown** — SIGINT/SIGTERM → drain connections → close DB
-- 🌐 **Full CORS** — browser SDKs work without proxy hacks
-- 🗜️ **Gzip support** — transparent decompression of compressed payloads
-- 🧩 **Both endpoints** — `/api/{id}/store/` (legacy) and `/api/{id}/envelope/` (modern)
-- 🏥 **Health Check** — `/health` endpoint for uptime monitoring and orchestration
-- 🔔 **Webhooks** — Instant error alerts in Telegram and Discord (only for new unique errors)
-- 🛠️ **Error Lifecycle** — Resolve errors directly from the dashboard (automatically reopens if the error reoccurs)
-- 📂 **Project Management** — Create isolated workspaces for your different apps and fetch dynamic DSNs
-- 🗺️ **Source Maps** — Automatic demangling of minified JavaScript stacktraces via local `.map` files
-- ⚡ **Performance Monitoring** — Track slow transactions with waterfall visualization of nested spans
-- 👁️ **Interactive Stacktraces** — Prism.js syntax highlighting and toggle to collapse/expand third-party library frames
-- 🍞 **Breadcrumbs Timeline** — Visual history of user actions (UI clicks, HTTP requests, console logs) preceding an error
-- 🏷️ **Release Tracking** — Track errors associated with specific app versions (releases) with badges
-- 🤖 **Interactive Telegram Bot** — Resolve errors directly from the Telegram chat with action buttons
-- ⚙️ **Notification Routing** — Project-specific webhook target overrides (Discord/Telegram) for smart alerting
-- 💬 **Local Issue Notes** — Add team comments and debugging notes directly to errors in the dashboard
-- 🚀 **Smart Resolving** — Mark errors as "Resolved in Next Release" and let PocketSentry automatically detect regressions
+- **Drop-in compatible** — works with official Sentry SDKs out of the box
+- **Single binary** — templates embedded via `go:embed`, zero external files
+- **Ultra-lightweight** — ~18 MB binary, < 20 MB RAM at runtime
+- **Embedded SQLite** — pure-Go driver ([modernc.org/sqlite](https://modernc.org/sqlite)), no CGO hassle
+- **Auto-deduplication** — identical errors are grouped by `(project, message, level)` with a hit counter
+- **Real-time dashboard** — dark-themed UI with HTMX auto-refresh (every 2s)
+- **Detailed Stacktraces** — Clickable rows to view full error details and raw JSON payloads
+- **Analytics & Filters** — Interactive charts and instant HTMX filtering by error level
+- **Basic Auth** — Built-in dashboard protection via username and password (ingestion API remains open)
+- **Retention Policy** — Background auto-cleanup of old events from the database
+- **Graceful shutdown** — SIGINT/SIGTERM → drain connections → close DB
+- **CORS for ingestion** — browser SDKs work without proxy hacks (private dashboard routes get no CORS headers)
+- **Gzip support** — transparent decompression of compressed payloads (with size limits)
+- **Both endpoints** — `/api/{id}/store/` (legacy) and `/api/{id}/envelope/` (modern)
+- **Health Check** — `/health` endpoint for uptime monitoring and orchestration
+- **Webhooks** — Instant error alerts in Telegram and Discord (only for new unique errors)
+- **Error Lifecycle** — Resolve errors directly from the dashboard (automatically reopens if the error reoccurs)
+- **Project Management** — Create isolated workspaces for your different apps and fetch dynamic DSNs
+- **Source Maps** — Automatic demangling of minified JavaScript stacktraces via local `.map` files
+- **Performance Monitoring** — Track slow transactions with waterfall visualization of nested spans
+- **Interactive Stacktraces** — Prism.js syntax highlighting and toggle to collapse/expand third-party library frames
+- **Breadcrumbs Timeline** — Visual history of user actions (UI clicks, HTTP requests, console logs) preceding an error
+- **Release Tracking** — Track errors associated with specific app versions (releases) with badges
+- **Interactive Telegram Bot** — Resolve errors directly from the Telegram chat with action buttons
+- **Notification Routing** — Project-specific webhook target overrides (Discord/Telegram) for smart alerting
+- **Local Issue Notes** — Add team comments and debugging notes directly to errors in the dashboard
+- **Smart Resolving** — Mark errors as "Resolved in Next Release" and let PocketSentry automatically detect regressions
 
-### 🚀 Quick Start
+### Quick Start
 
 **1. Download and run:**
 
@@ -105,7 +103,7 @@ That's it. Open [http://localhost:8080](http://localhost:8080) to see the dashbo
 **2. Point your SDK:**
 
 <details>
-<summary><strong>🐍 Python</strong></summary>
+<summary><strong>Python</strong></summary>
 
 ```python
 import sentry_sdk
@@ -122,7 +120,7 @@ raise ValueError("Hello from PocketSentry!")
 </details>
 
 <details>
-<summary><strong>🟨 JavaScript / Node.js</strong></summary>
+<summary><strong>JavaScript / Node.js</strong></summary>
 
 ```javascript
 const Sentry = require("@sentry/node");
@@ -138,7 +136,7 @@ Sentry.captureException(new Error("Hello from PocketSentry!"));
 </details>
 
 <details>
-<summary><strong>🌐 Browser (@sentry/browser)</strong></summary>
+<summary><strong>Browser (@sentry/browser)</strong></summary>
 
 ```javascript
 import * as Sentry from "@sentry/browser";
@@ -154,7 +152,7 @@ throw new Error("Hello from PocketSentry!");
 </details>
 
 <details>
-<summary><strong>🐹 Go</strong></summary>
+<summary><strong>Go</strong></summary>
 
 ```go
 import "github.com/getsentry/sentry-go"
@@ -171,7 +169,7 @@ func main() {
 
 </details>
 
-### ⚙️ CLI Options
+### CLI Options
 
 | Flag | Default | Description |
 |---|---|---|
@@ -180,12 +178,18 @@ func main() {
 | `--admin-user` | `""` | Dashboard admin username (empty = auth disabled) |
 | `--admin-pass` | `""` | Dashboard admin password |
 | `--retention-days` | `30` | Auto-delete events older than N days (0 = disabled) |
+| `--log-retention-days` | `30` | Auto-delete app logs older than N days (0 = disabled) |
+| `--tx-retention-days` | `30` | Auto-delete transactions & spans older than N days (0 = disabled) |
 | `--checkupd` | `false` | Check for a newer release on GitHub and update if confirmed |
-| `--discord-webhook-url`| `""` | Discord Webhook URL for error notifications |
+| `--discord-webhook-url` | `""` | Discord Webhook URL for error notifications |
 | `--tg-token` | `""` | Telegram Bot Token for error notifications |
 | `--tg-chat-id` | `""` | Telegram Chat ID for error notifications |
+| `--enable-ebpf` | `false` | Enable the eBPF agent for zero-config HTTP 500 tracing (requires root) |
 
 Environment variables `PORT` and `DB_PATH` are also supported (flags take priority).
+Admin credentials can also be set via `POCKETSENTRY_ADMIN_USER` / `POCKETSENTRY_ADMIN_PASS` (env wins over flags, so secrets do not show up in `ps` output).
+
+> **Security note:** when `--admin-user`/`--admin-pass` (or the env variables) are not set, the dashboard is **not** protected. Always set credentials when exposing the server to a network.
 
 The server handles **graceful shutdown**: press `Ctrl+C` and it will finish in-flight requests, close the database, and exit cleanly.
 
@@ -198,19 +202,28 @@ $ ./pocketsentry --port 9090 --db /data/errors.db
   |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
                                                    |__/
   ──────────────────────────────────────────────────
-  🛡️  Version     : 3.2.0
-  🌐 Dashboard   : http://localhost:9090
-  📦 Database    : /data/errors.db
-  🔗 DSN         : http://public@localhost:9090/1
-  🔓 Auth        : disabled
-  🗑️  Retention   : 30 days
+  Version     : 3.2.0
+  Dashboard   : http://localhost:9090
+  Database    : /data/errors.db
+  DSN         : http://public@localhost:9090/1
+  Auth        : disabled
+  Retention   : 30 days
   ──────────────────────────────────────────────────
 
   Point your Sentry SDK to the DSN above.
   Press Ctrl+C to stop.
 ```
 
-### 🔨 Build from Source
+### Source Maps Support
+
+PocketSentry automatically demangles minified browser JavaScript back into readable source code with real file names and line numbers.
+
+The approach is deliberately simple (no complicated API uploads):
+1. Create a `sourcemaps` folder next to the binary (or mount it as a volume in Docker).
+2. Drop your `.map` files there (e.g. `main.min.js.map`), or upload them via `POST /api/sourcemaps/upload` from CI.
+3. When an error is opened, the server finds the map, restores the original code and highlights the line in the UI.
+
+### Build from Source
 
 ```bash
 git clone https://github.com/apvcode/pocketsentry.git
@@ -222,24 +235,24 @@ go build -o pocketsentry .
 
 **Requirements:** Go 1.22+ (no CGO, no external C libraries).
 
-### 🗺️ Roadmap
+### Roadmap
 
 **General Roadmap:**
 
-- [ ] **⚡ HTTP Latency Auto-Discovery via eBPF**: Measure transaction response times (p50/p90/p99) directly in the Linux kernel without SDKs or changes to application code.
-- [ ] **🔓 SSL/TLS Decryption via eBPF**: Trace secure HTTPS connections by hooking SSL libraries (OpenSSL/Go TLS) at the kernel level.
+- [ ] **HTTP Latency Auto-Discovery via eBPF**: Measure transaction response times (p50/p90/p99) directly in the Linux kernel without SDKs or changes to application code.
+- [ ] **SSL/TLS Decryption via eBPF**: Trace secure HTTPS connections by hooking SSL libraries (OpenSSL/Go TLS) at the kernel level.
 
 <details>
-<summary><strong>✅ Completed Features</strong></summary>
+<summary><strong>Completed Features</strong></summary>
 
-- [x] **📡 Real-time Log Tail (SSE)**: Stream logs to the UI in real-time with Live Tail mode.
-- [x] **🔑 Log-based Alerting Rules**: Instant Telegram/Discord alerts when specific regex patterns appear in logs.
-- [x] **🗑️ Comprehensive Log & Transaction Retention**: Automated cleanup for logs, transactions, spans, attachments, and replays.
-- [x] **🔭 OpenTelemetry OTLP Ingest**: Native endpoints (`/v1/traces`, `/v1/logs`) for direct OpenTelemetry SDK and Collector ingestion.
-- [x] **📈 Prometheus Metrics Endpoint**: Built-in `/metrics` exporter for infrastructure monitoring.
-- [x] **🐳 Docker & Kubernetes eBPF Metadata**: Enrich connection topology with container names and pod namespace info using Docker/k8s APIs.
-- [x] **🪵 Centralized Log Streaming**: Act as a lightweight log aggregator (like Loki) to query stdout/stderr application logs inside the UI.
-- [x] **🎥 Session Replay**: Support and visualize user session recordings (sent by Sentry SDK via `rrweb`) to see exactly what the user did before the crash.
+- [x] **Real-time Log Tail (SSE)**: Stream logs to the UI in real-time with Live Tail mode.
+- [x] **Log-based Alerting Rules**: Instant Telegram/Discord alerts when specific regex patterns appear in logs.
+- [x] **Comprehensive Log & Transaction Retention**: Automated cleanup for logs, transactions, spans, attachments, and replays.
+- [x] **OpenTelemetry OTLP Ingest**: Native endpoints (`/v1/traces`, `/v1/logs`) for direct OpenTelemetry SDK and Collector ingestion.
+- [x] **Prometheus Metrics Endpoint**: Built-in `/metrics` exporter for infrastructure monitoring.
+- [x] **Docker & Kubernetes eBPF Metadata**: Enrich connection topology with container names and pod namespace info using Docker/k8s APIs.
+- [x] **Centralized Log Streaming**: Act as a lightweight log aggregator (like Loki) to query stdout/stderr application logs inside the UI.
+- [x] **Session Replay**: Support and visualize user session recordings (sent by Sentry SDK via `rrweb`) to see exactly what the user did before the crash.
 - [x] **Linux eBPF Agent**: Catch 500 Internal Server Errors and connection tracking directly from the Linux kernel without SDKs (run with `--enable-ebpf`).
 - [x] **Network Topology Map**: Visual dashboard showing how your Docker containers/services interact.
 - [x] **Smart Alerting Rules**: Conditional routing for webhooks (e.g., notify only if an error occurs > 10 times in 5 minutes).
@@ -263,257 +276,6 @@ go build -o pocketsentry .
 
 </details>
 
-### 📄 License
+### License
 
 [MIT](LICENSE) — use it, fork it, ship it.
-
----
-
-<a id="русский"></a>
-
-## 🇷🇺 Русский
-
-### 🔥 Проблема
-
-Самостоятельный хостинг [Sentry](https://sentry.io) — это **инфраструктурный ад**:
-
-| Что нужно | Чем платишь |
-|---|---|
-| 40+ Docker-контейнеров | Часы работы DevOps |
-| Kafka, Redis, ClickHouse, PostgreSQL, Zookeeper… | 16+ ГБ RAM минимум |
-| `docker-compose.yml` из преисподней | Постоянное обслуживание |
-
-Ты просто хотел поймать `TypeError` в своём пет-проекте. А не деплоить распределённую систему.
-
-### 💡 Решение
-
-**PocketSentry** — это один автономный бинарник, который говорит на протоколе Sentry. Твои существующие SDK (`sentry-python`, `@sentry/browser`, `sentry-go` и др.) подключаются к нему без изменений в коде — просто замени DSN.
-
-| | Sentry (Self-hosted) | PocketSentry |
-|---|---|---|
-| **Деплой** | 40+ контейнеров, Compose/K8s | **1 файл, `./pocketsentry`** |
-| **RAM** | 16+ ГБ | **< 20 МБ** |
-| **База данных** | PostgreSQL + ClickHouse + Redis | **SQLite (WAL-режим + Дедупликация)** |
-| **Размер** | Гигабайты образов | **~18 МБ** |
-| **Зависимости** | Kafka, Zookeeper, Snuba… | **Ноль** |
-| **Время деплоя** | 30+ минут | **3 секунды** |
-| **CGO** | — | **Не нужен — чистый Go** |
-
-### ✨ Возможности
-
-- 🔌 **Drop-in совместимость** — работает с официальными Sentry SDK из коробки
-- 📦 **Один бинарник** — шаблоны встроены через `go:embed`, никаких внешних файлов
-- 🪶 **Ультралёгкий** — ~18 МБ бинарник, < 20 МБ RAM в рантайме
-- 🗄️ **Встроенный SQLite** — pure-Go драйвер ([modernc.org/sqlite](https://modernc.org/sqlite)), без CGO
-- 🔄 **Авто-дедупликация** — одинаковые ошибки группируются по `(project, message, level)` со счётчиком
-- 📊 **Дашборд реального времени** — тёмная тема, HTMX автообновление каждые 2 секунды
-- 🔍 **Detailed Stacktraces** — Кликабельные строки для просмотра детальной информации об ошибке и сырого JSON-пейлоада
-- 📈 **Analytics & Filters** — Интерактивные графики и мгновенная фильтрация ошибок по уровням (HTMX)
-- 🛡️ **Basic Auth** — Встроенная защита дашборда логином и паролем (API для приема логов остается открытым)
-- 🧹 **Retention Policy** — Фоновая авто-очистка старых логов из базы данных
-- 🔒 **Graceful Shutdown** — SIGINT/SIGTERM → дождаться запросов → закрыть БД
-- 🌐 **Полный CORS** — браузерные SDK работают без проксирования
-- 🗜️ **Gzip** — прозрачная декомпрессия сжатых payload'ов
-- 🧩 **Оба эндпоинта** — `/api/{id}/store/` (legacy) и `/api/{id}/envelope/` (modern)
-- 🏥 **Health Check** — эндпоинт `/health` для мониторинга аптайма и оркестрации
-- 🔔 **Уведомления** — Мгновенные алерты об ошибках в Telegram и Discord (только для новых уникальных ошибок)
-- 🛠️ **Жизненный цикл ошибок** — Возможность отмечать ошибки как «решенные» прямо из дашборда (автоматически переоткрываются, если баг повторится)
-- 📂 **Управление проектами** — Создание отдельных воркспейсов для разных приложений со своими DSN.
-- 🗺️ **Source Maps** — Автоматическая расшифровка минифицированных JS-ошибок (просто положите `.map` файлы в папку `sourcemaps/`).
-- ⚡ **Мониторинг производительности** — Отслеживание медленных транзакций с визуализацией дерева спанов (Waterfall chart).
-- 👁️ **Интерактивные стек-трейсы** — Подсветка синтаксиса (Prism.js) и скрытие системного кода (library frames) одной кнопкой.
-- 🍞 **Лента хлебных крошек** — Визуальный таймлайн действий пользователя (клики, запросы, консоль лог) перед ошибкой.
-- 🏷️ **Отслеживание релизов** — Отображение версии приложения для каждой ошибки с фиолетовыми бейджами релизов.
-- 🤖 **Интерактивный Telegram-бот** — Решайте ошибки прямо из чата с помощью кнопок действий.
-- ⚙️ **Роутинг уведомлений** — Указание индивидуальных Telegram/Discord вебхуков для каждого проекта.
-- 💬 **Локальные заметки** — Оставляйте комментарии и заметки по дебагу прямо на странице ошибки.
-- 🚀 **Умный авто-резолв** — Отмечайте баг как «решенный в следующем релизе», и система сама откроет его при регрессии.
-
-### 🚀 Быстрый старт
-
-**1. Скачай и запусти:**
-
-*Вариант А: Обычный бинарник*
-```bash
-./pocketsentry --port 8080
-```
-
-*Вариант Б: Docker*
-```bash
-docker-compose up -d
-```
-
-Всё! Открой [http://localhost:8080](http://localhost:8080) и смотри дашборд.
-
-**2. Подключи свой SDK:**
-
-<details>
-<summary><strong>🐍 Python</strong></summary>
-
-```python
-import sentry_sdk
-
-sentry_sdk.init(
-    dsn="http://public@localhost:8080/1",
-    traces_sample_rate=0,
-)
-
-# Проверка
-raise ValueError("Привет от PocketSentry!")
-```
-
-</details>
-
-<details>
-<summary><strong>🟨 JavaScript / Node.js</strong></summary>
-
-```javascript
-const Sentry = require("@sentry/node");
-
-Sentry.init({
-  dsn: "http://public@localhost:8080/1",
-});
-
-// Проверка
-Sentry.captureException(new Error("Привет от PocketSentry!"));
-```
-
-</details>
-
-<details>
-<summary><strong>🌐 Браузер (@sentry/browser)</strong></summary>
-
-```javascript
-import * as Sentry from "@sentry/browser";
-
-Sentry.init({
-  dsn: "http://public@localhost:8080/1",
-});
-
-// Проверка
-throw new Error("Привет от PocketSentry!");
-```
-
-</details>
-
-<details>
-<summary><strong>🐹 Go</strong></summary>
-
-```go
-import "github.com/getsentry/sentry-go"
-
-func main() {
-    sentry.Init(sentry.ClientOptions{
-        Dsn: "http://public@localhost:8080/1",
-    })
-    defer sentry.Flush(2 * time.Second)
-
-    sentry.CaptureMessage("Привет от PocketSentry!")
-}
-```
-
-</details>
-
-### ⚙️ Параметры CLI
-
-| Флаг | По умолчанию | Описание |
-|---|---|---|
-| `--port` | `8080` | Порт HTTP-сервера |
-| `--db` | `pocketsentry.db` | Путь к файлу базы данных SQLite |
-| `--admin-user` | `""` | Логин для защиты дашборда (пусто = отключено) |
-| `--admin-pass` | `""` | Пароль для дашборда |
-| `--retention-days` | `30` | Количество дней хранения логов (0 = хранить вечно) |
-| `--checkupd` | `false` | Проверить наличие новой версии на GitHub и обновиться при подтверждении |
-| `--discord-webhook-url`| `""` | URL вебхука Discord для уведомлений об ошибках |
-| `--tg-token` | `""` | Токен Telegram-бота для уведомлений об ошибках |
-| `--tg-chat-id` | `""` | ID чата Telegram для уведомлений об ошибках |
-
-### 🗺️ Поддержка Source Maps
-
-PocketSentry умеет автоматически расшифровывать минифицированный JavaScript код из браузера, превращая его в читаемый исходный код с указанием реальных файлов и строк.
-Для этого используется максимально простой подход (без сложных загрузок через API):
-1. Создайте папку `sourcemaps` рядом с бинарником (или примонтируйте её как Volume в Docker).
-2. Положите туда ваши `.map` файлы (например, `main.min.js.map`).
-3. При открытии ошибки сервер автоматически найдет карту, восстановит оригинальный код и подсветит нужную строчку в красивом блоке кода прямо в UI.
-
-Также поддерживаются переменные окружения `PORT` и `DB_PATH` (флаги имеют приоритет).
-
-Сервер поддерживает **Graceful Shutdown**: нажми `Ctrl+C`, и он корректно завершит текущие запросы, закроет базу данных и выйдет с кодом 0.
-
-```
-$ ./pocketsentry --port 9090 --db /data/errors.db
-
-   ___           _        _   ___            _
-  | _ \ ___  __ | | __ __| |_/ __| ___ _ __ | |_ _ _ _  _
-  |  _// _ \/ _|| |/ // _| __\__ \/ _ \ '_ \|  _| '_| || |
-  |_|  \___/\__||_\_\\__|\__|___/\___/_||_|\__|_| \_, |
-                                                   |__/
-  ──────────────────────────────────────────────────
-  🛡️  Version     : 3.2.0
-  🌐 Dashboard   : http://localhost:9090
-  📦 Database    : /data/errors.db
-  🔗 DSN         : http://public@localhost:9090/1
-  🔓 Auth        : disabled
-  🗑️  Retention   : 30 days
-  ──────────────────────────────────────────────────
-
-  Point your Sentry SDK to the DSN above.
-  Press Ctrl+C to stop.
-```
-
-### 🔨 Сборка из исходников
-
-```bash
-git clone https://github.com/apvcode/pocketsentry.git
-cd pocketsentry
-go mod tidy
-go build -o pocketsentry .
-./pocketsentry
-```
-
-**Требования:** Go 1.22+ (без CGO, без внешних C-библиотек).
-
-### 🗺️ Дорожная карта
-
-**Ближайшие планы:**
-
-- [ ] **⚡ Автоматический замер задержек через eBPF**: Измерение времени ответа (p50/p90/p99) транзакций на уровне сетевого стека ядра Linux без SDK.
-- [ ] **🔓 Расшифровка SSL/TLS трафика через eBPF**: Перехват и трассировка защищенных соединений HTTPS с помощью eBPF uretprobes на OpenSSL и Go TLS.
-
-<details>
-<summary><strong>✅ Выполненные задачи</strong></summary>
-
-- [x] **📡 Живой стриминг логов (SSE)**: Динамическое отображение логов на дашборде в режиме Live Tail в реальном времени.
-- [x] **🔑 Алерты на основе логов**: Мгновенная отправка алертов в Telegram/Discord при обнаружении регулярных выражений или критических событий в логах.
-- [x] **🗑️ Полная ротация и очистка логов/транзакций**: Автоматическое удаление старых логов, транзакций, спанов, вложений и реплеев.
-- [x] **🔭 Поддержка OpenTelemetry OTLP**: Эндпоинты (`/v1/traces`, `/v1/logs`) для прямого приема данных от OTel Collector и SDK.
-- [x] **📈 Prometheus Метрики**: Встроенный эндпоинт `/metrics` для мониторинга состояния PocketSentry.
-- [x] **🐳 eBPF-интеграция с Docker и K8s**: Отображение реальных имен Docker-контейнеров и Kubernetes-подов на карте сети вместо сырых IP/PID.
-- [x] **🪵 Сбор сырых логов (Log Aggregation)**: Полноценный поиск по логам приложений (stdout/stderr) в реальном времени прямо на дашборде.
-- [x] **🎥 Воспроизведение сессий (Session Replay)**: Поддержка записей действий пользователей (через `rrweb` в Sentry SDK) с воспроизведением «видео» прямо в деталях ошибки.
-- [x] **eBPF Агент (Linux)**: Перехват 500-х HTTP ошибок из ядра Linux без изменения кода приложения (запуск с флагом `--enable-ebpf`).
-- [x] **Карта сети (Topology)**: Визуальный дашборд взаимодействия ваших Docker-контейнеров с подсветкой узких мест.
-- [x] **Умные правила уведомлений**: Настройка условий отправки алертов (например, отправлять уведомление только если ошибка произошла более 10 раз за 5 минут).
-- [x] **Загрузка Source Maps через API**: API-эндпоинт для автоматической отправки `.map` файлов напрямую из CI/CD пайплайнов.
-- [x] **Аналитика задержек (Latency)**: Графики перцентилей (p50, p90, p99) для отслеживания деградации скорости ответа транзакций на дашборде.
-- [x] **Умное группирование**: Пользовательские правила на основе регулярных выражений для объединения похожих ошибок.
-- [x] **Здоровье системы и БД**: Графики размера базы SQLite, объема входящих запросов (RPS) и детальной статистики очистки устаревших данных.
-- [x] **Поддержка вложений**: Сохранение и отображение скриншотов, логов и файлов, отправленных клиентом через Sentry SDK.
-- [x] Страница детального просмотра ошибки со стектрейсом
-- [x] Политика хранения (авто-удаление старых событий)
-- [x] Аутентификация
-- [x] Управление проектами (создание/удаление)
-- [x] Поддержка Source Maps
-- [x] Docker-образ
-- [x] Экспорт данных логов (CSV)
-- [x] Умный роутинг уведомлений (разные чаты для разных проектов)
-- [x] Интерактивный Telegram-бот (кнопки решения прямо из чата)
-- [x] Поддержка Транзакций (Performance Monitoring)
-- [x] Локальные заметки (комментарии прямо на странице ошибки)
-- [x] Заглушить на время (Snooze для подавления уведомлений)
-
-</details>
-
-### 📄 Лицензия
-
-[MIT](LICENSE) — используй, форкай, шипь.

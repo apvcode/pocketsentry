@@ -245,6 +245,13 @@ func initDB(path string) error {
 		return fmt.Errorf("create performance tables: %w", err)
 	}
 
+	// Migrate spans to be unique per transaction instead of globally:
+	// span ids are only 8 hex chars and collide across traces, which silently
+	// dropped spans with INSERT OR IGNORE on a global PRIMARY KEY.
+	if err := migrateSpans(); err != nil {
+		return fmt.Errorf("migrate spans: %w", err)
+	}
+
 	// Insert default project if not exists
 	_, err = db.Exec("INSERT OR IGNORE INTO projects (id, name, created_at) VALUES ('1', 'Default Project', CURRENT_TIMESTAMP)")
 	if err != nil {
@@ -252,6 +259,63 @@ func initDB(path string) error {
 	}
 
 	return nil
+}
+
+// migrateSpans rebuilds the spans table with a composite unique key
+// (transaction_id, id). It is a no-op when the table is empty or already
+// migrated.
+func migrateSpans() error {
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM spans").Scan(&count); err != nil || count == 0 {
+		return err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Detect old schema: global PK on id alone.
+	var oldSchema bool
+	rows, err := tx.Query("SELECT sql FROM sqlite_master WHERE type='table' AND name='spans'")
+	if err != nil {
+		return err
+	}
+	var ddl string
+	if rows.Next() {
+		_ = rows.Scan(&ddl)
+	}
+	rows.Close()
+	oldSchema = strings.Contains(strings.ToUpper(ddl), "PRIMARY KEY (id)")
+
+	if !oldSchema {
+		return nil // already migrated
+	}
+
+	if _, err := tx.Exec(`
+		CREATE TABLE spans_v2 (
+			id TEXT NOT NULL,
+			transaction_id TEXT NOT NULL,
+			parent_span_id TEXT NOT NULL,
+			op TEXT NOT NULL,
+			description TEXT NOT NULL,
+			start_timestamp DATETIME NOT NULL,
+			timestamp DATETIME NOT NULL,
+			duration_ms REAL NOT NULL,
+			PRIMARY KEY (transaction_id, id)
+		);
+		INSERT OR IGNORE INTO spans_v2 (id, transaction_id, parent_span_id, op, description, start_timestamp, timestamp, duration_ms)
+			SELECT id, transaction_id, parent_span_id, op, description, start_timestamp, timestamp, duration_ms FROM spans;
+		DROP TABLE spans;
+		ALTER TABLE spans_v2 RENAME TO spans;
+		CREATE INDEX IF NOT EXISTS idx_spans_transaction ON spans(transaction_id);
+	`); err != nil {
+		return err
+	}
+
+	log.Printf("[db] migrated spans table to composite key (transaction_id, id)")
+	return tx.Commit()
 }
 
 // ---------- Ingestion Metrics ----------
@@ -269,9 +333,39 @@ func incrIngestCount() {
 
 // ---------- Smart Grouping ----------
 
+// groupingRuleCache caches compiled regexes keyed by "pattern\x00replacement"
+// so ingestion does not recompile patterns on every event.
+var groupingRuleCache sync.Map
+
+func cachedCompile(pattern string) (*regexp.Regexp, bool) {
+	if v, ok := groupingRuleCache.Load(pattern); ok {
+		re, _ := v.(*regexp.Regexp)
+		return re, re != nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		// Remember the failure too, so bad patterns are not retried.
+		groupingRuleCache.Store(pattern, (*regexp.Regexp)(nil))
+		return nil, false
+	}
+	groupingRuleCache.Store(pattern, re)
+	return re, true
+}
+
+func invalidateGroupingRuleCache() {
+	groupingRuleCache.Range(func(k, v any) bool {
+		groupingRuleCache.Delete(k)
+		return true
+	})
+}
+
 // applyGroupingRules normalizes the event message by applying all enabled
 // grouping rules for the given project.
 func applyGroupingRules(msg, projectID string) string {
+	if len(msg) > 64*1024 {
+		// Do not run user regexes over huge inputs (ReDoS mitigation).
+		return msg
+	}
 	rows, err := db.Query(
 		`SELECT pattern, replacement FROM grouping_rules
 		 WHERE enabled = 1 AND (project_id = '' OR project_id = ?)
@@ -284,11 +378,14 @@ func applyGroupingRules(msg, projectID string) string {
 	normalized := msg
 	for rows.Next() {
 		var pattern, replacement string
-		if err := rows.Scan(&pattern, &replacement); err != nil {
+		if err := rows.Scan(&pattern, replacement); err != nil {
 			continue
 		}
-		re, err := regexp.Compile(pattern)
-		if err != nil {
+		if len(pattern) > 1024 {
+			continue
+		}
+		re, ok := cachedCompile(pattern)
+		if !ok {
 			continue
 		}
 		normalized = re.ReplaceAllString(normalized, replacement)
@@ -300,13 +397,16 @@ func applyGroupingRules(msg, projectID string) string {
 
 // saveAttachment stores an attachment file on disk and records metadata in the DB.
 func saveAttachment(eventID, filename, contentType string, data []byte) error {
-	dir := filepath.Join("data", "attachments", eventID)
+	if !eventIDRe.MatchString(eventID) {
+		return fmt.Errorf("invalid event id")
+	}
+	dir := filepath.Join(attachmentsDir(), eventID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir attachments: %w", err)
 	}
 
 	safeName := filepath.Base(filename)
-	if safeName == "" || safeName == "." || safeName == ".." {
+	if !safeFilenameRe.MatchString(safeName) {
 		safeName = "attachment"
 	}
 
@@ -405,7 +505,7 @@ func saveEvent(ev models.SentryEvent, projectID, rawPayload string) error {
 	}
 
 	incrIngestCount()
-	ev.Message = applyGroupingRules(ev.Message, projectID)
+	ev.Message = helpers.Truncate(applyGroupingRules(ev.Message, projectID), 8192)
 
 	ts := time.Now().UTC()
 	if ev.Timestamp != "" {
@@ -417,13 +517,24 @@ func saveEvent(ev models.SentryEvent, projectID, rawPayload string) error {
 	}
 	tsStr := ts.Format(time.RFC3339)
 
+	// SELECT + upsert must be atomic so concurrent duplicates cannot cause
+	// duplicated or lost webhook notifications.
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
 	var oldStatus string
-	err := db.QueryRow("SELECT status FROM events WHERE project_id = ? AND message = ? AND level = ?", projectID, ev.Message, ev.Level).Scan(&oldStatus)
+	err = tx.QueryRow("SELECT status FROM events WHERE project_id = ? AND message = ? AND level = ?", projectID, ev.Message, ev.Level).Scan(&oldStatus)
 	isNew := err == sql.ErrNoRows
+	if err != nil && !isNew {
+		return fmt.Errorf("select status: %w", err)
+	}
 
 	var newCount int
 	var newStatus string
-	err = db.QueryRow(
+	err = tx.QueryRow(
 		`INSERT INTO events (id, project_id, timestamp, level, platform, message, raw_payload, count, last_seen, status, resolved_in_release, snoozed_until)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 'unresolved', '', '')
 		 ON CONFLICT(project_id, message, level) DO UPDATE SET
@@ -449,6 +560,9 @@ func saveEvent(ev models.SentryEvent, projectID, rawPayload string) error {
 	).Scan(&newCount, &newStatus)
 	if err != nil {
 		return fmt.Errorf("upsert event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
 	}
 	log.Printf("event project=%s level=%s msg=%q count=%d status=%s",
 		projectID, ev.Level, helpers.Truncate(ev.Message, 80), newCount, newStatus)
@@ -981,6 +1095,7 @@ func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
 // storeHandler handles the legacy /api/{project_id}/store/ endpoint.
 func storeHandler(w http.ResponseWriter, r *http.Request) {
 	projectID := extractProjectID(r.URL.Path, "/store/")
+	r.Body = http.MaxBytesReader(w, r.Body, middleware.MaxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
@@ -1004,6 +1119,7 @@ func storeHandler(w http.ResponseWriter, r *http.Request) {
 // envelopeHandler handles the newer /api/{project_id}/envelope/ endpoint.
 func envelopeHandler(w http.ResponseWriter, r *http.Request) {
 	projectID := extractProjectID(r.URL.Path, "/envelope/")
+	r.Body = http.MaxBytesReader(w, r.Body, middleware.MaxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
@@ -1094,8 +1210,11 @@ func extractAndSaveReplays(envelopeData []byte, eventID string) {
 			if replayID == "" {
 				continue
 			}
-			os.MkdirAll(filepath.Join("data", "replays"), 0755)
-			filePath := filepath.Join("data", "replays", replayID+".jsonl")
+			if !eventIDRe.MatchString(replayID) {
+				continue
+			}
+			os.MkdirAll(replaysDir(), 0755)
+			filePath := filepath.Join(replaysDir(), replayID+".jsonl")
 			f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err == nil {
 				f.Write(lines[i+1])
@@ -1133,7 +1252,7 @@ func latencyAnalyticsHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query(`
 		SELECT strftime('%Y-%m-%d %H:00:00', start_timestamp) as bucket, duration_ms 
 		FROM transactions 
-		WHERE start_timestamp >= datetime('now', '-24 hours')
+		WHERE datetime(start_timestamp) >= datetime('now', '-24 hours')
 	`)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -1529,6 +1648,7 @@ func groupingRulesHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		invalidateGroupingRuleCache()
 
 		if r.Header.Get("HX-Request") == "true" {
 			w.Header().Set("HX-Refresh", "true")
@@ -2005,6 +2125,7 @@ func otlpTracesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ingested := 0
+	firstSpan := true
 	for _, rs := range payload.ResourceSpans {
 		for _, ss := range rs.ScopeSpans {
 			for _, span := range ss.Spans {
@@ -2015,7 +2136,14 @@ func otlpTracesHandler(w http.ResponseWriter, r *http.Request) {
 				if tx.EventID == "" {
 					tx.EventID = helpers.GenerateUUID()
 				}
-				_ = saveTransaction(tx, "1", string(body))
+				// Store the raw payload only for the first span of the trace
+				// to avoid N-fold DB bloat.
+				raw := ""
+				if firstSpan {
+					raw = string(body)
+					firstSpan = false
+				}
+				_ = saveTransaction(tx, "1", raw)
 				ingested++
 			}
 		}
@@ -2361,12 +2489,33 @@ func deleteGroupingRuleHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	invalidateGroupingRuleCache()
 	if r.Header.Get("HX-Request") == "true" {
 		w.Header().Set("HX-Refresh", "true")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// validEventID reports whether the string is a hex/UUID-shaped event id
+// (32 hex chars, optionally with dashes). Anything else is rejected so it
+// cannot be used for path traversal.
+var eventIDRe = regexp.MustCompile(`^[0-9a-fA-F-]{8,64}$`)
+
+// safeFilenameRe restricts attachment filenames to plain word characters,
+// dots, underscores and hyphens (no separators, no traversal sequences).
+var safeFilenameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+// attachmentsDir returns the absolute base directory for attachments,
+// anchored next to the database file instead of the process CWD.
+func attachmentsDir() string {
+	return filepath.Join(filepath.Dir(dbFilePath), "data", "attachments")
+}
+
+// replaysDir returns the absolute base directory for replay chunks.
+func replaysDir() string {
+	return filepath.Join(filepath.Dir(dbFilePath), "data", "replays")
 }
 
 // attachmentHandler serves attachment files from disk.
@@ -2378,9 +2527,22 @@ func attachmentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	eventID := parts[0]
-	filename := filepath.Base(parts[1])
+	filename := parts[1]
 
-	filePath := filepath.Join("data", "attachments", eventID, filename)
+	// Reject anything that is not a plain event id / filename to make
+	// path traversal via the URL impossible.
+	if !eventIDRe.MatchString(eventID) || !safeFilenameRe.MatchString(filename) {
+		http.NotFound(w, r)
+		return
+	}
+
+	baseDir := attachmentsDir()
+	filePath := filepath.Join(baseDir, eventID, filename)
+	// Defense in depth: the resolved path must stay inside baseDir.
+	if !strings.HasPrefix(filePath, baseDir+string(filepath.Separator)) {
+		http.NotFound(w, r)
+		return
+	}
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		http.NotFound(w, r)
 		return
@@ -2392,7 +2554,16 @@ func attachmentHandler(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 
-	w.Header().Set("Content-Type", contentType)
+	// Only images are served inline with their real type; everything else is
+	// forced to a download so attacker-controlled content types (e.g.
+	// text/html) cannot execute in the dashboard's origin.
+	if strings.HasPrefix(contentType, "image/") {
+		w.Header().Set("Content-Type", contentType)
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeFile(w, r, filePath)
 }
 
@@ -2741,9 +2912,12 @@ func newRouter() http.Handler {
 	mux.Handle("/api/replays/", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		replayID := strings.TrimPrefix(r.URL.Path, "/api/replays/")
 		replayID = filepath.Base(replayID)
-		filePath := filepath.Join("data", "replays", replayID+".jsonl")
+		if !eventIDRe.MatchString(replayID) {
+			http.NotFound(w, r)
+			return
+		}
+		filePath := filepath.Join(replaysDir(), replayID+".jsonl")
 
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		http.ServeFile(w, r, filePath)
 	})))
@@ -2752,8 +2926,10 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/metrics", metricsHandler)
 
-	// Real-time SSE log stream endpoint
-	mux.HandleFunc("/api/logs/stream", logsStreamHandler)
+	// Real-time SSE log stream endpoint (protected like the rest of the UI)
+	mux.Handle("/api/logs/stream", middleware.BasicAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logsStreamHandler(w, r)
+	})))
 
 	// OpenTelemetry OTLP Ingest endpoints
 	mux.HandleFunc("/v1/traces", otlpTracesHandler)
@@ -2762,6 +2938,7 @@ func newRouter() http.Handler {
 	// Public ingestion routes — NO auth.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/events" || r.URL.Path == "/api/stats" {
+			http.NotFound(w, r)
 			return
 		}
 		switch {
@@ -2865,6 +3042,13 @@ func main() {
 
 	middleware.AdminUser = *flagUser
 	middleware.AdminPass = *flagPass
+	// Env credentials win so secrets are not exposed in `ps` output.
+	if envUser := os.Getenv("POCKETSENTRY_ADMIN_USER"); envUser != "" {
+		middleware.AdminUser = envUser
+	}
+	if envPass := os.Getenv("POCKETSENTRY_ADMIN_PASS"); envPass != "" {
+		middleware.AdminPass = envPass
+	}
 	notify.DiscordWebhookURL = *flagDiscord
 	notify.TgToken = *flagTgToken
 	notify.TgChatID = *flagTgChatID

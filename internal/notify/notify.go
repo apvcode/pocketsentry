@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"strings"
@@ -14,6 +15,10 @@ import (
 	"github.com/pocketsentry/pocketsentry/internal/helpers"
 	"github.com/pocketsentry/pocketsentry/internal/models"
 )
+
+// httpClient is used for all outbound webhook / Telegram Bot API calls with
+// a sane timeout so hung requests cannot block pollers or pile up goroutines.
+var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 // Global webhook credentials (set from CLI flags in main).
 var (
@@ -66,11 +71,15 @@ func EnsureTelegramPollers() {
 
 func runTelegramPoller(token string) {
 	offset := 0
-	log.Printf("[telegram] started polling for bot token: %s...", token[:5])
+	tokenPreview := token
+	if len(tokenPreview) > 5 {
+		tokenPreview = tokenPreview[:5]
+	}
+	log.Printf("[telegram] started polling for bot token: %s...", tokenPreview)
 
 	for {
 		url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30", token, offset)
-		resp, err := http.Get(url)
+		resp, err := httpClient.Get(url)
 		if err != nil {
 			time.Sleep(5 * time.Second)
 			continue
@@ -118,7 +127,7 @@ func runTelegramPoller(token string) {
 
 				// Answer callback (removes loading state from button)
 				ansURL := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery?callback_query_id=%s&text=Event%%20Resolved!", token, cb.ID)
-				_, _ = http.Get(ansURL)
+				_, _ = httpClient.Get(ansURL)
 
 				// Edit message to remove button and append resolved info
 				newText := cb.Message.Text + fmt.Sprintf("\n\n✅ *Resolved by %s*", cb.From.FirstName)
@@ -129,7 +138,7 @@ func runTelegramPoller(token string) {
 					"message_id": cb.Message.MessageID,
 					"text":       newText,
 				})
-				http.Post(editURL, "application/json", bytes.NewReader(payload))
+				httpClient.Post(editURL, "application/json", bytes.NewReader(payload))
 			}
 		}
 	}
@@ -237,7 +246,7 @@ func TriggerWebhooks(ev models.SentryEvent, projectID string) {
 // SendDiscordWebhook sends a message to a Discord webhook URL.
 func SendDiscordWebhook(url, content string) {
 	payload, _ := json.Marshal(map[string]string{"content": content})
-	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("[discord] webhook error: %v", err)
 		return
@@ -249,13 +258,15 @@ func SendDiscordWebhook(url, content string) {
 }
 
 // SendTelegramWebhook sends a message to a Telegram chat via Bot API.
+// The message is sent in HTML mode with proper escaping: Markdown mode breaks
+// on messages containing `_`, `*` or `[` (very common in stack traces).
 func SendTelegramWebhook(token, chatID, content, eventID string) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 
 	payloadData := map[string]interface{}{
 		"chat_id":    chatID,
-		"text":       content,
-		"parse_mode": "Markdown",
+		"text":       html.EscapeString(content),
+		"parse_mode": "HTML",
 	}
 
 	if eventID != "" {
@@ -272,7 +283,7 @@ func SendTelegramWebhook(token, chatID, content, eventID string) {
 	}
 
 	payload, _ := json.Marshal(payloadData)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("[telegram] webhook error: %v", err)
 		return

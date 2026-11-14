@@ -15,7 +15,7 @@ import (
 )
 
 // CurrentVersion is the version of this binary, compared against GitHub releases.
-const CurrentVersion = "v3.2.0"
+const CurrentVersion = "v4.0.0"
 
 // CheckUpdate checks GitHub for a newer release. If one is found it prompts
 // the user to confirm, downloads the new binary, atomically replaces the
